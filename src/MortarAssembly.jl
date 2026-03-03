@@ -57,6 +57,13 @@ both directions:
     pairs = [InterfacePair(1, s_facet, 2, m_facet),
              InterfacePair(2, m_facet, 1, s_facet)]
 
+Symmetric stabilization (per half-pass s):
+    Π_λ = ∫_Γ^(s) [ (δλ^s + δλ^m)·(ε/2)(λ^s + λ^m)
+                    - δλ^s·(1/2)(u^m + u^s) ] dS
+
+→ Z = (ε/2)(Rs+Rm)(Rs+Rm)^T  (symmetric, positive semidefinite)
+→ C includes both slave and master displacement contributions (½ each)
+
 The system assembled is:
     [K    C ] [d]   [F_ext]
     [C^T  -Z] [λ] = [  0  ]
@@ -137,6 +144,10 @@ function build_mortar_coupling(
                 (ξ_m > 1.0 + 1e-10 || ξ_m < -1e-10) && continue
 
                 # ── Assemble C and Z ────────────────────────────────────────
+                # Symmetric formulation:
+                #   Z  = (ε/2)(Rs+Rm)(Rs+Rm)^T  [positive semidefinite, symmetric]
+
+                # --- slave rows ---
                 for b in 1:nsen_s
                     cp_s_b = Ps[IEN_s[sel, b]]
                     As_b   = findfirst(==(cp_s_b), Pc)   # row index for Z
@@ -157,23 +168,51 @@ function build_mortar_coupling(
 
                     As_b === nothing && continue   # Z rows require a valid As_b
 
-                    # Z: slave-slave stabilization
+                    # Z: slave-slave  [+ε/2, sign flipped from old formulation]
                     for c in 1:nsen_s
                         cp_s2 = Ps[IEN_s[sel, c]]
                         As_c  = findfirst(==(cp_s2), Pc)
                         As_c === nothing && continue
-                        Z[As_b,       As_c]       -= epss * R_s[b] * R_s[c] * gwJ
-                        Z[As_b + nlm, As_c + nlm] -= epss * R_s[b] * R_s[c] * gwJ
+                        Z[As_b,       As_c]       -= 0.5 * epss * R_s[b] * R_s[c] * gwJ
+                        Z[As_b + nlm, As_c + nlm] -= 0.5 * epss * R_s[b] * R_s[c] * gwJ
                     end
 
-                    # Z: slave-master cross coupling
+                    # Z: slave-master  [+ε/2]
                     for c in 1:(pm[1] + 1)
                         local_m = span_m - pm[1] + c - 1   # 1-based index into Pm
                         cp_m    = Pm[local_m]
                         Am_c    = findfirst(==(cp_m), Pc)
                         Am_c === nothing && continue
-                        Z[As_b,       Am_c]       += epss * R_s[b] * R_m[c] * gwJ
-                        Z[As_b + nlm, Am_c + nlm] += epss * R_s[b] * R_m[c] * gwJ
+                        Z[As_b,       Am_c]       += 0.5 * epss * R_s[b] * R_m[c] * gwJ
+                        Z[As_b + nlm, Am_c + nlm] += 0.5 * epss * R_s[b] * R_m[c] * gwJ
+                    end
+                end
+
+                # --- master rows (symmetric counterpart) ---
+                for bm in 1:(pm[1] + 1)
+                    local_m_b = span_m - pm[1] + bm - 1
+                    cp_m_b    = Pm[local_m_b]
+                    Am_b      = findfirst(==(cp_m_b), Pc)
+
+                    Am_b === nothing && continue   # Z rows require a valid Am_b
+
+                    # Z: master-slave  [+ε/2]
+                    for c in 1:nsen_s
+                        cp_s_c = Ps[IEN_s[sel, c]]
+                        As_c   = findfirst(==(cp_s_c), Pc)
+                        As_c === nothing && continue
+                        Z[Am_b,       As_c]       += 0.5 * epss * R_m[bm] * R_s[c] * gwJ
+                        Z[Am_b + nlm, As_c + nlm] += 0.5 * epss * R_m[bm] * R_s[c] * gwJ
+                    end
+
+                    # Z: master-master  [+ε/2]
+                    for cm in 1:(pm[1] + 1)
+                        local_m_c = span_m - pm[1] + cm - 1
+                        cp_m_c    = Pm[local_m_c]
+                        Am_c      = findfirst(==(cp_m_c), Pc)
+                        Am_c === nothing && continue
+                        Z[Am_b,       Am_c]       -= 0.5 * epss * R_m[bm] * R_m[cm] * gwJ
+                        Z[Am_b + nlm, Am_c + nlm] -= 0.5 * epss * R_m[bm] * R_m[cm] * gwJ
                     end
                 end
 
