@@ -129,6 +129,8 @@ Returns:
 
 Ported from Build_ID.m.
 """
+build_id(ned::Int, ncp::Int) = build_id(Vector{Vector{Int}}(), ned, ncp)
+
 function build_id(
     bc_per_dof::Vector{Vector{Int}},
     ned::Int, ncp::Int
@@ -139,7 +141,7 @@ function build_id(
 
     for A in 1:ncp
         for i in 1:ned
-            if A in bc_per_dof[i]
+            if !isempty(bc_per_dof) && A in bc_per_dof[i]
                 ID[i, A] = 0
             else
                 eq += 1

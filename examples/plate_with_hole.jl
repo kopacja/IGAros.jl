@@ -254,7 +254,8 @@ function solve_plate(
     nu::Float64        = 0.3,
     epss::Float64      = 0.0,   # 0 = auto-scale: E * s2 (coarser radial step)
     NQUAD::Int         = p_ord + 1,
-    NQUAD_mortar::Int  = 10
+    NQUAD_mortar::Int  = 10,
+    strategy::IntegrationStrategy = ElementBasedIntegration()
 )::Tuple{Float64, Float64}
 
     nsd = 2;  npd = 2;  ned = 2;  npc = 2
@@ -356,7 +357,8 @@ function solve_plate(
     Pc = build_interface_cps(pairs, p_mat, n_mat_ref, KV_ref, P_ref, npd, nnp)
 
     C, Z = build_mortar_coupling(Pc, pairs, p_mat, n_mat_ref, KV_ref, P_ref, B_ref,
-                                  ID, nnp, ned, nsd, npd, neq, NQUAD_mortar, epss_use)
+                                  ID, nnp, ned, nsd, npd, neq, NQUAD_mortar, epss_use,
+                                  strategy)
 
     # ── Solve ─────────────────────────────────────────────────────────────────
     U, _ = solve_mortar(K_bc, C, Z, F_bc)

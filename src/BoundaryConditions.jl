@@ -92,6 +92,29 @@ function _facet_dirs(facet::Int, npd::Int)
         # facet 4: left   (ξ=1),  free: ξ-lines
         table = Dict(1 => ([1], 1), 2 => ([2], 1), 3 => ([1], -1), 4 => ([2], -1))
         return table[facet]
+    elseif npd == 3
+        # For 3D solid patches (ξ=dir1, η=dir2, ζ=dir3):
+        # The norm_sign corrects the raw cross-product sign so that the
+        # result is the outward unit normal.  Cross-product rule:
+        #   free [1,2]: e₁×e₂ = +e₃  → outward = ±e₃
+        #   free [2,3]: e₂×e₃ = +e₁  → outward = ±e₁
+        #   free [1,3]: e₁×e₃ = −e₂  → outward = ∓e₂  (note minus sign!)
+        #
+        # facet 1: ζ=1   (inner/front), free: [ξ,η]=[1,2], norm_sign=-1
+        # facet 2: ξ=n₁  (right),       free: [η,ζ]=[2,3], norm_sign=+1
+        # facet 3: η=n₂  (top),         free: [ξ,ζ]=[1,3], norm_sign=-1  (e₁×e₃=−e₂, ×(−1)=+e₂✓)
+        # facet 4: ξ=1   (left),        free: [η,ζ]=[2,3], norm_sign=-1
+        # facet 5: η=1   (bottom/front), free: [ξ,ζ]=[1,3], norm_sign=+1 (e₁×e₃=−e₂, ×(+1)=−e₂✓)
+        # facet 6: ζ=n₃  (outer/back),  free: [ξ,η]=[1,2], norm_sign=+1
+        table = Dict(
+            1 => ([1,2], -1),
+            2 => ([2,3], +1),
+            3 => ([1,3], -1),
+            4 => ([2,3], -1),
+            5 => ([1,3], +1),
+            6 => ([1,2], +1),
+        )
+        return table[facet]
     end
     error("_facet_dirs: npd=$npd not implemented")
 end
@@ -104,6 +127,16 @@ function _facet_fixed(facet::Int, npd::Int, n::AbstractVector{Int})
             2 => (1, n[1]),        # ξ = n[1]  (last)
             3 => (2, n[2]),        # η = n[2]  (last)
             4 => (1, 1),           # ξ = 1
+        )
+        return table[facet]
+    elseif npd == 3
+        table = Dict(
+            1 => (3, 1),           # ζ = 1
+            2 => (1, n[1]),        # ξ = n[1]
+            3 => (2, n[2]),        # η = n[2]
+            4 => (1, 1),           # ξ = 1
+            5 => (2, 1),           # η = 1
+            6 => (3, n[3]),        # ζ = n[3]
         )
         return table[facet]
     end
@@ -257,9 +290,9 @@ function segment_load(
 
             if traction isa Function
                 Xe = B[Ps[ien[el, :]], :]
-                X  = Xe' * R               # physical coordinates (X[1]=x, X[2]=y)
-                σ  = traction(X[1], X[2])  # must return (nsd×nsd) Cauchy stress matrix
-                Fp = σ * n_vec             # traction = σ · n  (2×2 @ 2→2)
+                X  = Xe' * R               # physical coordinates (nsd+1,), first nsd are Cartesian
+                σ  = traction(X[1:nsd]...) # must return (nsd×nsd) Cauchy stress matrix
+                Fp = σ * n_vec             # traction = σ · n
             elseif length(traction) > 1
                 Fp = traction               # global traction vector
             else

@@ -14,6 +14,7 @@ include("Assembly.jl")
 include("BoundaryConditions.jl")
 include("Solver.jl")
 include("MortarGeometry.jl")
+include("MortarIntegration.jl")
 include("MortarAssembly.jl")
 include("MortarSolver.jl")
 
@@ -42,8 +43,15 @@ export
     linear_solve,
     # MortarGeometry
     eval_boundary_point, closest_point_1d,
+    eval_surface_point, closest_point_2d,
+    # MortarIntegration
+    IntegrationStrategy, ElementBasedIntegration, SegmentBasedIntegration,
+    FormulationStrategy, TwinMortarFormulation, SinglePassFormulation, DualPassFormulation,
+    NormalStrategy, SlaveNormal, MasterNormal, AverageNormal,
+    SegmentCell2D, sutherland_hodgman_clip, triangulate_polygon, tri_gauss_rule,
+    find_interface_segments_1d, find_interface_segments_2d,
     # MortarAssembly
-    InterfacePair, build_interface_cps, build_mortar_coupling,
+    InterfacePair, build_interface_cps, build_mortar_coupling, build_mortar_mass_matrices,
     # MortarSolver
     solve_mortar
 
