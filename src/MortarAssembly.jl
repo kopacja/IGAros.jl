@@ -6,6 +6,7 @@
 #   build_mortar_coupling(..., ElementBasedIntegration())  — default, GP per slave element
 #   build_mortar_coupling(..., SegmentBasedIntegration())  — exact segment-based quadrature
 
+
 """
     InterfacePair(slave_patch, slave_facet, master_patch, master_facet)
 
@@ -79,10 +80,14 @@ Accumulate one Gauss-point contribution to the Twin Mortar coupling matrix C
 and stabilization matrix Z.  Called identically by both element-based and
 segment-based integration loops.
 
-Symmetric formulation (per half-pass s):
-  - C[eq_i(b), As_c + (d-1)*nlm] -= dir_vecs[i,d] * R_s[b] * R_s[c] * gwJ
-  - Z diagonal blocks: -(ε/2) R_s ⊗ R_s per direction
-  - Z off-diagonal:    +(ε/2) R_s ⊗ R_m and +(ε/2) R_m ⊗ R_s per direction
+Twin Mortar formulation (per half-pass s on Γ_s):
+  C assembly — two-half-pass (each pass fills its own surface row):
+  - slave disp, slave mult: C[eq_s(b), As_c] += δ_{id} R_s[b] R_s[c] gwJ   (+D^(s))
+  - slave disp, master mult: C[eq_s(b), Am_c] -= δ_{id} R_s[b] R_m[c] gwJ  (-M^(sm))
+  Z assembly — full averaged: -(ε/2)(R_s + R_m)(R_s + R_m)^T
+  - Z[s,s]: -(ε/2) R_s ⊗ R_s,  Z[m,m]: -(ε/2) R_m ⊗ R_m
+  - Z[s,m]: -(ε/2) R_s ⊗ R_m,  Z[m,s]: -(ε/2) R_m ⊗ R_s
+  Summing both passes: Z = ε[D̄^(1), M̄; M̄^T, D̄^(2)]  (symmetric)
 
 Arguments
 - `R_s, R_m`   : slave/master NURBS shape functions at the Gauss point
@@ -107,6 +112,7 @@ end
 @inline function _accumulate_mortar!(C, Z, ::DualPassFormulation, args...)
     _accumulate_mortar_dp!(C, Z, args...)
 end
+
 
 # ─── Single-pass accumulation kernel ─────────────────────────────────────────
 """
@@ -164,7 +170,17 @@ function _accumulate_mortar!(
     # Z: no contribution
 end
 
-# ─── Core Twin Mortar kernel (unchanged) ─────────────────────────────────────
+# ─── Core Twin Mortar kernel (paper formulation: halfC + full-averaged Z) ─────
+#
+# C: two-half-pass assembly — each pass s fills the ENTIRE displacement row
+#    for surface s.  Pass s on Γ_s contributes:
+#      C[disp_s, λ_s] += R_s ⊗ R_s · gwJ           (+D^(s))
+#      C[disp_s, λ_m] -= R_s ⊗ R_m · gwJ           (��M^(sm))
+#
+# Z: full two-pass averaged — -(ε/2)(R_s + R_m)(R_s + R_m)^T
+#    accumulates all 4 sub-blocks per pass, giving Z = ε[D̄, M̄; M̄^T, D̄]
+#    which is symmetric by construction.
+#
 function _accumulate_mortar!(
     C, Z,
     R_s::AbstractVector{Float64}, R_m::AbstractVector{Float64},
@@ -178,12 +194,9 @@ function _accumulate_mortar!(
     nsen_m = length(master_cps)
     n_dirs = size(dir_vecs, 2)   # number of multiplier directions (= nsd)
 
-    # ── slave rows ───────────────────────────────────────────────────────────
+    # ── C: slave disp rows, slave multiplier cols  +D^(s) ────────────────────
     for b in 1:nsen_s
         cp_s_b = slave_cps[b]
-        As_b   = findfirst(==(cp_s_b), Pc)
-
-        # C: displacement DOF (b) ← multiplier at each slave CP (c)
         for i in 1:ned
             eq_i = ID[i, cp_s_b]
             eq_i == 0 && continue
@@ -192,12 +205,34 @@ function _accumulate_mortar!(
                 As_c   = findfirst(==(cp_s_c), Pc)
                 As_c === nothing && continue
                 for d in 1:n_dirs
-                    C[eq_i, As_c + (d-1)*nlm] -= dir_vecs[i, d] * R_s[b] * R_s[c] * gwJ
+                    C[eq_i, As_c + (d-1)*nlm] += dir_vecs[i, d] * R_s[b] * R_s[c] * gwJ
                 end
             end
         end
+    end
 
-        As_b === nothing && continue   # Z rows require a valid As_b
+    # ── C: slave disp rows, master multiplier cols  −M^(sm) ──────────────────
+    for b in 1:nsen_s
+        cp_s_b = slave_cps[b]
+        for i in 1:ned
+            eq_i = ID[i, cp_s_b]
+            eq_i == 0 && continue
+            for c in 1:nsen_m
+                cp_m_c = master_cps[c]
+                Am_c   = findfirst(==(cp_m_c), Pc)
+                Am_c === nothing && continue
+                for d in 1:n_dirs
+                    C[eq_i, Am_c + (d-1)*nlm] -= dir_vecs[i, d] * R_s[b] * R_m[c] * gwJ
+                end
+            end
+        end
+    end
+
+    # ── Z: -(ε/2)(R_s + R_m)(R_s + R_m)^T  (penalizes flux sum λ^s + λ̄^m) ─
+    for b in 1:nsen_s
+        cp_s_b = slave_cps[b]
+        As_b   = findfirst(==(cp_s_b), Pc)
+        As_b === nothing && continue
 
         # Z: slave-slave  [-ε/2] per direction
         for c in 1:nsen_s
@@ -209,30 +244,30 @@ function _accumulate_mortar!(
             end
         end
 
-        # Z: slave-master  [+ε/2] per direction
+        # Z: slave-master  [-ε/2] per direction
         for c in 1:nsen_m
             cp_m_c = master_cps[c]
             Am_c   = findfirst(==(cp_m_c), Pc)
             Am_c === nothing && continue
             for d in 1:n_dirs
-                Z[As_b + (d-1)*nlm, Am_c + (d-1)*nlm] += 0.5 * epss * R_s[b] * R_m[c] * gwJ
+                Z[As_b + (d-1)*nlm, Am_c + (d-1)*nlm] -= 0.5 * epss * R_s[b] * R_m[c] * gwJ
             end
         end
     end
 
-    # ── master rows (symmetric counterpart) ─────────────────────────────────
+    # ── Z: master rows ──────────────────────────────────────────────────────
     for bm in 1:nsen_m
         cp_m_b = master_cps[bm]
         Am_b   = findfirst(==(cp_m_b), Pc)
         Am_b === nothing && continue
 
-        # Z: master-slave  [+ε/2] per direction
+        # Z: master-slave  [-ε/2] per direction
         for c in 1:nsen_s
             cp_s_c = slave_cps[c]
             As_c   = findfirst(==(cp_s_c), Pc)
             As_c === nothing && continue
             for d in 1:n_dirs
-                Z[Am_b + (d-1)*nlm, As_c + (d-1)*nlm] += 0.5 * epss * R_m[bm] * R_s[c] * gwJ
+                Z[Am_b + (d-1)*nlm, As_c + (d-1)*nlm] -= 0.5 * epss * R_m[bm] * R_s[c] * gwJ
             end
         end
 
@@ -252,8 +287,9 @@ end
 """
 Dual-pass mortar kernel (Puso & Solberg 2020).
 
-C assembly: identical to the TM kernel (slave-surface displacement rows only;
-master rows come from the second pass when roles are swapped).
+C assembly: slave-surface displacement rows only (−D^(s) with norm_sign);
+master rows come from the second pass when roles are swapped.
+(Different from TwinMortar, which assembles both slave and master rows.)
 
 Z assembly: **only slave-side rows**, with full factor ε (not ε/2).
 The master-side rows (Z_ms, Z_mm) are NOT assembled here; they come from the
@@ -333,10 +369,12 @@ function _assemble_pair!(
     B, ID, ned, nsd, npd, NQUAD, epss
 )
     GPW = gauss_product(NQUAD, npd - 1)
-    # Global Cartesian directions, scaled by norm_sign_s so that the two
-    # half-passes of Twin Mortar contribute consistently (both reinforce
-    # the jump constraint instead of partially canceling).
-    dir_vecs = norm_sign_s * Matrix{Float64}(I, nsd, nsd)
+    # Global Cartesian directions.
+    # TwinMortar: plain identity (paper convention — two-pass C provides coupling).
+    # SinglePass/DualPass: scaled by norm_sign_s for consistent half-pass signs.
+    dir_vecs = formulation isa TwinMortarFormulation ?
+        Matrix{Float64}(I, nsd, nsd) :
+        norm_sign_s * Matrix{Float64}(I, nsd, nsd)
 
     for sel in 1:nsel_s
         anchor = IEN_s[sel, 1]
@@ -410,7 +448,9 @@ function _assemble_pair!(
     pm, nm, KVm, Pm, norm_sign_m,
     B, ID, ned, nsd, npd, NQUAD, epss
 )
-    dir_vecs = norm_sign_s * Matrix{Float64}(I, nsd, nsd)
+    dir_vecs = formulation isa TwinMortarFormulation ?
+        Matrix{Float64}(I, nsd, nsd) :
+        norm_sign_s * Matrix{Float64}(I, nsd, nsd)
 
     if npd == 2
         # ── 2D problem: 1D segment-based integration (knot-span intersections) ──
@@ -538,13 +578,14 @@ both directions:
     pairs = [InterfacePair(1, s_facet, 2, m_facet),
              InterfacePair(2, m_facet, 1, s_facet)]
 
-Twin Mortar formulation (per half-pass s):
-    δΠ_C = ∫_Γ^(s) λ^s·(δu^m − δu^s) dS
-    δΠ_λ = ∫_Γ^(s) δλ^s·[(u^m − u^s) + ε(λ^s − λ^m)] dS
+Twin Mortar formulation (per half-pass s, integrated on Γ^(s)):
+    δΠ_C = ∫_Γ^(s) (δu^s − δū^m)·λ^s dΓ           (coupling)
+    δΠ_λ = ∫_Γ^(s) δλ^s·(u^s − ū^m) dΓ + δΠ_ε     (constraint)
+    δΠ_ε = Σ_s (ε/2)∫_Γ^(s) (δλ^s + δλ̄^m)·(λ^s + λ̄^m) dΓ  (stabilization)
 
-→ C has slave displacement rows only (full factor, slave multipliers);
-  master displacement rows come from the second half-pass when roles are swapped
-→ Z = -(ε/2)(Rs − Rm)(Rs − Rm)^T  (penalizes multiplier difference)
+→ C has slave AND master displacement rows per half-pass:
+  slave rows: +D^(s) (self-coupling), master rows: −M^(sm)^T (cross-coupling)
+→ Z = -(ε/2)(Rs + Rm)(Rs + Rm)^T  (penalizes flux sum λ^s + λ̄^m)
 
 The system assembled is:
     [K    C ] [d]   [F_ext]
@@ -742,6 +783,71 @@ function _assemble_mass_pair!(
             end
 
             # Accumulate M = ∫ R_s R_m^T dΓ
+            for b in 1:length(slave_cps)
+                ib = get(s_map, slave_cps[b], 0)
+                ib == 0 && continue
+                for c in 1:length(master_cps)
+                    jc = get(m_map, master_cps[c], 0)
+                    jc == 0 && continue
+                    M_mat[ib, jc] += R_s[b] * R_m[c] * gwJ
+                end
+            end
+        end
+    end
+end
+
+"""
+Segment-based assembly of scalar mortar mass matrices D and M (1D interfaces only).
+Uses knot-span intersection segments for exact integration.
+"""
+function _assemble_mass_pair!(
+    D, M_mat, ::SegmentBasedIntegration,
+    ps, ns, KVs, Ps, nsen_s, nsel_s, norm_sign_s, IEN_s, INC_s,
+    pm, nm, KVm, Pm, norm_sign_m,
+    B, nsd, npd, NQUAD, s_map, m_map
+)
+    npd == 2 || error("Segment-based _assemble_mass_pair! only implemented for 2D (1D interfaces)")
+
+    ξ_breaks = find_interface_segments_1d(
+        ps[1], ns[1], KVs[1], pm[1], nm[1], KVm[1], B, Ps, Pm, nsd
+    )
+
+    pts1d, wts1d = gauss_rule(NQUAD)
+    nsen_m_local = pm[1] + 1
+
+    for k in 1:(length(ξ_breaks) - 1)
+        ξ_a, ξ_b = ξ_breaks[k], ξ_breaks[k+1]
+        ξ_b - ξ_a < 1e-14 && continue
+
+        dξ = 0.5 * (ξ_b - ξ_a)
+
+        for q in 1:NQUAD
+            ξ_s = 0.5 * (ξ_a + ξ_b) + dξ * pts1d[q]
+
+            x_s, dxdξ_s, R_s, span_s = eval_boundary_point(
+                ξ_s, ps[1], ns[1], KVs[1], B, Ps, nsd
+            )
+            detJ_s = norm(dxdξ_s)
+            gwJ    = wts1d[q] * dξ * detJ_s
+
+            ξ_m, _, _, R_m, span_m = closest_point_1d(
+                clamp(ξ_s, 0.0, 1.0), x_s, pm[1], nm[1], KVm[1], B, Pm, nsd
+            )
+            (ξ_m > 1.0 + 1e-10 || ξ_m < -1e-10) && continue
+
+            slave_cps  = [Ps[span_s - ps[1] + b - 1] for b in 1:(ps[1]+1)]
+            master_cps = [Pm[span_m - pm[1] + c - 1] for c in 1:nsen_m_local]
+
+            for b in 1:length(slave_cps)
+                ib = get(s_map, slave_cps[b], 0)
+                ib == 0 && continue
+                for c in 1:length(slave_cps)
+                    ic = get(s_map, slave_cps[c], 0)
+                    ic == 0 && continue
+                    D[ib, ic] += R_s[b] * R_s[c] * gwJ
+                end
+            end
+
             for b in 1:length(slave_cps)
                 ib = get(s_map, slave_cps[b], 0)
                 ib == 0 && continue
