@@ -285,21 +285,20 @@ end
 
 # ─── Dual-Pass (Puso-Solberg) kernel ─────────────────────────────────────────
 """
-Dual-pass mortar kernel (Puso & Solberg 2020).
+Dual-pass mortar kernel (Puso & Solberg 2020, Eqs. 8 & 13).
 
-C assembly: slave-surface displacement rows only (−D^(s) with norm_sign);
-master rows come from the second pass when roles are swapped.
-(Different from TwinMortar, which assembles both slave and master rows.)
+KKT system (paper convention): [K, Cᵀ; C, Z]
 
-Z assembly: **only slave-side rows**, with full factor ε (not ε/2).
-The master-side rows (Z_ms, Z_mm) are NOT assembled here; they come from the
-second pass (when patch roles are swapped) via the slave-side rows of that pass.
+C = [D⁽¹⁾, −M⁽²¹⁾; −M⁽¹²⁾, D⁽²⁾]   (multiplier rows × displacement cols)
+  Pass s assembles row s: +D⁽ˢ⁾ (slave×slave) and −M⁽ᵐˢ⁾ (slave×master).
+  In C_code (= Cᵀ): D block → slave disp rows × slave mult cols,
+                     M block → master disp rows × slave mult cols.
 
-This leaves Z_sm and Z_ms unsymmetrised for non-conforming meshes with
-element-based integration (slave and master Gauss-point sets differ), matching
-the Puso-Solberg formulation.  For segment-based integration the result is
-identical to `TwinMortarFormulation` because the intersection-segment
-integrals are the same for both passes.
+Z = ε·[D⁽¹⁾, M⁽²¹⁾; M⁽¹²⁾, D⁽²⁾]   (positive definite)
+  Z_code = −Z (solver uses [K,C;C',−Z]).
+  Pass s assembles slave mult rows: −ε·D⁽ˢ⁾ and −ε·M⁽ˢᵐ⁾.
+
+ε mapping to P&S parameter: ε = α·E·h / 2  (§4.3: γ = α·E).
 """
 function _accumulate_mortar_dp!(
     C, Z,
@@ -314,7 +313,12 @@ function _accumulate_mortar_dp!(
     nsen_m = length(master_cps)
     n_dirs = size(dir_vecs, 2)
 
-    # ── C: slave-surface displacement rows (identical to TM) ─────────────────
+    # ── C: two blocks per pass ──────────────────────────────────────────────
+    #  Pass s (slave=s, master=m, integration on Γ^s) assembles C_paper row s:
+    #    C_paper[λ^s, U^s] = +D^(s)    → C_code[U^s, λ^s] += D   (slave disp, slave mult)
+    #    C_paper[λ^s, U^m] = −M^(ms)   → C_code[U^m, λ^s] -= M^T (master disp, slave mult)
+    #
+    # D^(s) block: slave disp rows ← slave multiplier cols
     for b in 1:nsen_s
         cp_s_b = slave_cps[b]
         for i in 1:ned
@@ -325,19 +329,38 @@ function _accumulate_mortar_dp!(
                 As_c   = findfirst(==(cp_s_c), Pc)
                 As_c === nothing && continue
                 for d in 1:n_dirs
-                    C[eq_i, As_c + (d-1)*nlm] -= dir_vecs[i, d] * R_s[b] * R_s[c] * gwJ
+                    C[eq_i, As_c + (d-1)*nlm] += dir_vecs[i, d] * R_s[b] * R_s[c] * gwJ
+                end
+            end
+        end
+    end
+    # −M^T block: master disp rows ← slave multiplier cols
+    for b in 1:nsen_m
+        cp_m_b = master_cps[b]
+        for i in 1:ned
+            eq_i = ID[i, cp_m_b]
+            eq_i == 0 && continue
+            for c in 1:nsen_s
+                cp_s_c = slave_cps[c]
+                As_c   = findfirst(==(cp_s_c), Pc)
+                As_c === nothing && continue
+                for d in 1:n_dirs
+                    C[eq_i, As_c + (d-1)*nlm] -= dir_vecs[i, d] * R_m[b] * R_s[c] * gwJ
                 end
             end
         end
     end
 
-    # ── Z: slave-side rows only, full ε ──────────────────────────────────────
+    # ── Z: stabilization, slave rows only ───────────────────────────────────
+    #  Z_paper = ε·[D^(s), M^(sm); M^(ms), D^(m)]  (positive definite)
+    #  Z_code  = −Z_paper  (solver uses [K,C; C',−Z])
+    #  Pass s assembles row s: Z_code[λ^s, λ^s] = −ε·D^s, Z_code[λ^s, λ^m] = −ε·M^sm
     for b in 1:nsen_s
         cp_s_b = slave_cps[b]
         As_b   = findfirst(==(cp_s_b), Pc)
         As_b === nothing && continue
 
-        # Z_ss: slave-slave  [-ε]
+        # Z_ss: −ε·D^s
         for c in 1:nsen_s
             cp_s_c = slave_cps[c]
             As_c   = findfirst(==(cp_s_c), Pc)
@@ -347,17 +370,17 @@ function _accumulate_mortar_dp!(
             end
         end
 
-        # Z_sm: slave-master  [+ε]
+        # Z_sm: −ε·M^sm
         for c in 1:nsen_m
             cp_m_c = master_cps[c]
             Am_c   = findfirst(==(cp_m_c), Pc)
             Am_c === nothing && continue
             for d in 1:n_dirs
-                Z[As_b + (d-1)*nlm, Am_c + (d-1)*nlm] += epss * R_s[b] * R_m[c] * gwJ
+                Z[As_b + (d-1)*nlm, Am_c + (d-1)*nlm] -= epss * R_s[b] * R_m[c] * gwJ
             end
         end
     end
-    # Note: no master rows (Z_ms, Z_mm) — contributed by the second pass.
+    # Note: master rows (Z_ms, Z_mm) contributed by the second pass.
 end
 
 # ─── Element-based integration (default) ─────────────────────────────────────
@@ -370,11 +393,12 @@ function _assemble_pair!(
 )
     GPW = gauss_product(NQUAD, npd - 1)
     # Global Cartesian directions.
-    # TwinMortar: plain identity (paper convention — two-pass C provides coupling).
-    # SinglePass/DualPass: scaled by norm_sign_s for consistent half-pass signs.
-    dir_vecs = formulation isa TwinMortarFormulation ?
-        Matrix{Float64}(I, nsd, nsd) :
-        norm_sign_s * Matrix{Float64}(I, nsd, nsd)
+    # TwinMortar / DualPass: plain identity (two-pass C provides coupling;
+    #   both D and M must keep their relative signs per pass).
+    # SinglePass: scaled by norm_sign_s for consistent half-pass signs.
+    dir_vecs = formulation isa SinglePassFormulation ?
+        norm_sign_s * Matrix{Float64}(I, nsd, nsd) :
+        Matrix{Float64}(I, nsd, nsd)
 
     for sel in 1:nsel_s
         anchor = IEN_s[sel, 1]
@@ -448,9 +472,9 @@ function _assemble_pair!(
     pm, nm, KVm, Pm, norm_sign_m,
     B, ID, ned, nsd, npd, NQUAD, epss
 )
-    dir_vecs = formulation isa TwinMortarFormulation ?
-        Matrix{Float64}(I, nsd, nsd) :
-        norm_sign_s * Matrix{Float64}(I, nsd, nsd)
+    dir_vecs = formulation isa SinglePassFormulation ?
+        norm_sign_s * Matrix{Float64}(I, nsd, nsd) :
+        Matrix{Float64}(I, nsd, nsd)
 
     if npd == 2
         # ── 2D problem: 1D segment-based integration (knot-span intersections) ──

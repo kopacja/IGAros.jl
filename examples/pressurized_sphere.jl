@@ -2,8 +2,9 @@
 #
 # Internally pressurized thick sphere — 3D Twin Mortar benchmark.
 # Two-patch solid sphere octant (first octant x,y,z ≥ 0).
-# Non-conforming mesh: Patch 1 (inner, r_i→r_c) has twice as many angular
+# Non-conforming mesh: Patch 1 (inner, r_i→r_c) has mesh_ratio× as many angular
 # elements as Patch 2 (outer, r_c→r_o) in both angular directions.
+# Default parameters match Puso & Solberg (2020) §10.3: Ri=1, Ro=1.4, E=1, ν=0.3.
 #
 # Exact Lamé solution (radially symmetric): σ_rr, σ_θθ=σ_φφ.
 # L2 stress error vs h convergence for degrees p = 2, 3, 4.
@@ -66,7 +67,7 @@ function lame_displacement_sphere(x::Real, y::Real, z::Real;
     den = E * (r_o^3 - r_i^3)
     C1  = p_i * r_i^3 * (1 - 2nu) / den    # coefficient of r
     C2  = p_i * r_i^3 * r_o^3 * (1 + nu) / (2den) # coefficient of 1/r²
-    u_r = C1 * r - C2 / r^2
+    u_r = C1 * r + C2 / r^2
     return u_r * x/r, u_r * y/r, u_r * z/r
 end
 
@@ -111,8 +112,8 @@ Returns B (ncp × 4, [x, y, z, w]) and P (patch-to-global CP index list).
 """
 function sphere_geometry(p_ord::Int;
                          r_i::Float64 = 1.0,
-                         r_c::Float64 = 1.5,
-                         r_o::Float64 = 2.0)::Tuple{Matrix{Float64}, Vector{Vector{Int}}}
+                         r_c::Float64 = 1.2,
+                         r_o::Float64 = 1.4)::Tuple{Matrix{Float64}, Vector{Vector{Int}}}
 
     ws = 1.0 / sqrt(2.0)   # weight for 45° arc midpoint (exact NURBS circle)
 
@@ -287,29 +288,262 @@ function l2_stress_error_sphere(
     return sqrt(err2), sqrt(ref2)
 end
 
+# ─────────────────────── L2 displacement error ───────────────────────────────
+
+"""
+    l2_disp_error_sphere(U, ID, npc, nsd, npd, p, n, KV, P, B,
+                         nen, nel, IEN, INC, NQUAD, disp_fn) -> (err_abs, err_ref)
+
+L2 displacement error: err² = ∫ ||u_h − u_ex||² dΩ.
+disp_fn(x,y,z) must return (ux,uy,uz).
+"""
+function l2_disp_error_sphere(
+    U::Vector{Float64},
+    ID::Matrix{Int},
+    npc::Int, nsd::Int, npd::Int,
+    p::Matrix{Int}, n::Matrix{Int},
+    KV::Vector{<:AbstractVector{<:AbstractVector{Float64}}},
+    P::Vector{Vector{Int}},
+    B::Matrix{Float64},
+    nen::Vector{Int}, nel::Vector{Int},
+    IEN::Vector{Matrix{Int}},
+    INC::Vector{<:AbstractVector{<:AbstractVector{Int}}},
+    NQUAD::Int,
+    disp_fn::Function
+)::Tuple{Float64, Float64}
+
+    ncp = size(B, 1)
+    Ub  = zeros(ncp, nsd)
+    for A in 1:ncp, i in 1:nsd
+        eq = ID[i, A]; eq != 0 && (Ub[A, i] = U[eq])
+    end
+
+    err2 = 0.0; ref2 = 0.0
+    GPW  = gauss_product(NQUAD, npd)
+
+    for pc in 1:npc
+        ien = IEN[pc]; inc = INC[pc]
+        for el in 1:nel[pc]
+            anchor = ien[el, 1]; n0 = inc[anchor]
+            for (gp, gw) in GPW
+                R_s, _, _, detJ, _ = shape_function(
+                    p[pc,:], n[pc,:], KV[pc], B, P[pc], gp,
+                    nen[pc], nsd, npd, el, n0, ien, inc)
+                detJ <= 0 && continue
+                gwJ = gw * detJ
+                u_h = (Ub[P[pc][ien[el,:]], 1:nsd])' * R_s
+                Xe  = B[P[pc][ien[el,:]], :]
+                X   = Xe' * R_s
+                ux_ex, uy_ex, uz_ex = disp_fn(X[1], X[2], X[3])
+                u_ex = [ux_ex, uy_ex, uz_ex]
+                diff = u_h[1:nsd] - u_ex
+                err2 += dot(diff, diff) * gwJ
+                ref2 += dot(u_ex, u_ex) * gwJ
+            end
+        end
+    end
+    return sqrt(err2), sqrt(ref2)
+end
+
+# ─────────────────────── Energy-norm error ───────────────────────────────────
+
+"""
+    energy_error_sphere(U, ID, npc, nsd, npd, p, n, KV, P, B,
+                        nen, nel, IEN, INC, materials, NQUAD,
+                        stress_fn) -> (err_abs, err_ref)
+
+Energy-norm error: err² = ∫ (σ_h − σ_ex) : D⁻¹ : (σ_h − σ_ex) dΩ.
+stress_fn(x,y,z) must return a 3×3 symmetric stress tensor.
+"""
+function energy_error_sphere(
+    U::Vector{Float64},
+    ID::Matrix{Int},
+    npc::Int, nsd::Int, npd::Int,
+    p::Matrix{Int}, n::Matrix{Int},
+    KV::Vector{<:AbstractVector{<:AbstractVector{Float64}}},
+    P::Vector{Vector{Int}},
+    B::Matrix{Float64},
+    nen::Vector{Int}, nel::Vector{Int},
+    IEN::Vector{Matrix{Int}},
+    INC::Vector{<:AbstractVector{<:AbstractVector{Int}}},
+    materials::Vector{LinearElastic},
+    NQUAD::Int,
+    stress_fn::Function
+)::Tuple{Float64, Float64}
+
+    ncp = size(B, 1)
+    Ub  = zeros(ncp, nsd)
+    for A in 1:ncp, i in 1:nsd
+        eq = ID[i, A]; eq != 0 && (Ub[A, i] = U[eq])
+    end
+
+    err2 = 0.0; ref2 = 0.0
+    GPW  = gauss_product(NQUAD, npd)
+
+    for pc in 1:npc
+        ien  = IEN[pc]; inc = INC[pc]
+        D    = elastic_constants(materials[pc], nsd)
+        Dinv = inv(D)
+        for el in 1:nel[pc]
+            anchor = ien[el, 1]; n0 = inc[anchor]
+            for (gp, gw) in GPW
+                R_s, dR_dx, _, detJ, _ = shape_function(
+                    p[pc,:], n[pc,:], KV[pc], B, P[pc], gp,
+                    nen[pc], nsd, npd, el, n0, ien, inc)
+                detJ <= 0 && continue
+                gwJ = gw * detJ
+                B0    = strain_displacement_matrix(nsd, nen[pc], dR_dx')
+                Ue    = vec(Ub[P[pc][ien[el,:]], 1:nsd]')
+                σ_h_v = D * (B0 * Ue)
+                Xe = B[P[pc][ien[el,:]], :]
+                X  = Xe' * R_s
+                σ_ex   = stress_fn(X[1], X[2], X[3])
+                σ_ex_v = [σ_ex[1,1], σ_ex[2,2], σ_ex[3,3],
+                           σ_ex[1,2], σ_ex[2,3], σ_ex[1,3]]
+                Δσ_v = σ_h_v - σ_ex_v
+                err2 += dot(Δσ_v, Dinv * Δσ_v) * gwJ
+                ref2 += dot(σ_ex_v, Dinv * σ_ex_v) * gwJ
+            end
+        end
+    end
+    return sqrt(err2), sqrt(ref2)
+end
+
+# ─────────────────────── Diagnostic solver ───────────────────────────────────
+
+"""
+    solve_sphere_diag(p_ord, exp_level; kwargs...) -> NamedTuple
+
+Like `solve_sphere` but returns L2-displacement, L2-stress, and energy-norm
+errors, plus the KKT components (K, C, Z).
+"""
+function solve_sphere_diag(
+    p_ord::Int, exp_level::Int;
+    r_i::Float64 = 1.0, r_c::Float64 = 1.2, r_o::Float64 = 1.4,
+    E::Float64 = 1.0, nu::Float64 = 0.3, p_i::Float64 = 0.01,
+    mesh_ratio::Float64 = 2.0,
+    epss::Float64 = 0.0,
+    NQUAD::Int = p_ord + 1, NQUAD_mortar::Int = p_ord + 2,
+    formulation::FormulationStrategy = TwinMortarFormulation(),
+    strategy::IntegrationStrategy = ElementBasedIntegration(),
+)
+    nsd = 3; npd = 3; ned = 3; npc = 2
+
+    if p_ord == 1
+        n_ang_o = 2^(exp_level + 1); n_ang_i = round(Int, mesh_ratio * n_ang_o); n_rad = 2^(exp_level + 1)
+        B_ref, P_ref = sphere_geometry_direct_p1(n_ang_i, n_ang_o, n_rad;
+                                                   r_i=r_i, r_c=r_c, r_o=r_o)
+        ncp = size(B_ref, 1)
+        p_mat = fill(1, npc, npd)
+        n_mat_ref = [n_ang_i+1  n_ang_i+1  n_rad+1;
+                     n_ang_o+1  n_ang_o+1  n_rad+1]
+        kv_i   = open_uniform_kv(n_ang_i, 1)
+        kv_o   = open_uniform_kv(n_ang_o, 1)
+        kv_rad = open_uniform_kv(n_rad,   1)
+        KV_ref = Vector{Vector{Vector{Float64}}}([
+            [kv_i, kv_i, kv_rad], [kv_o, kv_o, kv_rad]])
+        epss_use = epss > 0.0 ? epss : 100.0
+    else
+        B0, P  = sphere_geometry(p_ord; r_i=r_i, r_c=r_c, r_o=r_o)
+        p_mat  = fill(p_ord, npc, npd)
+        n_mat  = fill(p_ord + 1, npc, npd)
+        KV     = generate_knot_vectors(npc, npd, p_mat, n_mat)
+        n_ang = 2^exp_level; n_rad = 2^exp_level; n_ang_inner = round(Int, mesh_ratio * n_ang)
+        u_ang_o = Float64[i/n_ang       for i in 1:n_ang-1]
+        u_ang_i = Float64[i/n_ang_inner for i in 1:n_ang_inner-1]
+        u_rad   = Float64[i/n_rad       for i in 1:n_rad-1]
+        kref_data = Vector{Float64}[
+            vcat([1.0,1.0],u_ang_i), vcat([1.0,2.0],u_ang_i), vcat([1.0,3.0],u_rad),
+            vcat([2.0,1.0],u_ang_o), vcat([2.0,2.0],u_ang_o), vcat([2.0,3.0],u_rad)]
+        n_mat_ref, _, KV_ref, B_ref, P_ref = krefinement(
+            nsd, npd, npc, n_mat, p_mat, KV, B0, P, kref_data)
+        ncp = size(B_ref, 1)
+        epss_use = epss > 0.0 ? epss : 100.0
+    end
+
+    nel, nnp, nen = patch_metrics(npc, npd, p_mat, n_mat_ref)
+    IEN = build_ien(nsd, npd, npc, p_mat, n_mat_ref, nel, nnp, nen)
+    INC = [build_inc(n_mat_ref[pc, :]) for pc in 1:npc]
+
+    dBC = [1 3 2 1 2; 1 4 2 1 2; 2 4 2 1 2; 2 5 2 1 2; 3 2 2 1 2]
+    bc_per_dof = dirichlet_bc_control_points(p_mat, n_mat_ref, KV_ref, P_ref,
+                                              npd, nnp, ned, dBC)
+    neq, ID = build_id(bc_per_dof, ned, ncp)
+    LM      = build_lm(nen, ned, npc, nel, ID, IEN, P_ref)
+
+    mats = [LinearElastic(E, nu, :three_d), LinearElastic(E, nu, :three_d)]
+    Ub0  = zeros(ncp, nsd)
+    K, _ = build_stiffness_matrix(npc, nsd, npd, ned, neq,
+                                   p_mat, n_mat_ref, KV_ref, P_ref, B_ref, Ub0,
+                                   nen, nel, IEN, INC, LM, mats, NQUAD, 1.0)
+
+    stress_fn = (x, y, z) -> lame_stress_sphere(x, y, z; p_i=p_i, r_i=r_i, r_o=r_o)
+    F = zeros(neq)
+    F = segment_load(n_mat_ref[1,:], p_mat[1,:], KV_ref[1], P_ref[1], B_ref,
+                     nnp[1], nen[1], nsd, npd, ned,
+                     Int[], 1, ID, F, stress_fn, 1.0, NQUAD)
+    K_bc, F_bc = enforce_dirichlet(Tuple{Int,Float64}[], K, F)
+
+    pairs = formulation isa SinglePassFormulation ?
+        [InterfacePair(1,6,2,1)] :
+        [InterfacePair(1,6,2,1), InterfacePair(2,1,1,6)]
+    Pc = build_interface_cps(pairs, p_mat, n_mat_ref, KV_ref, P_ref, npd, nnp, formulation)
+    C, Z = build_mortar_coupling(Pc, pairs, p_mat, n_mat_ref, KV_ref, P_ref, B_ref,
+                                  ID, nnp, ned, nsd, npd, neq, NQUAD_mortar, epss_use,
+                                  strategy, formulation)
+    U, lam = solve_mortar(K_bc, C, Z, F_bc)
+
+    # L2 stress error
+    σ_abs, σ_ref = l2_stress_error_sphere(
+        U, ID, npc, nsd, npd, p_mat, n_mat_ref, KV_ref, P_ref, B_ref,
+        nen, nel, IEN, INC, mats, NQUAD, stress_fn)
+
+    # L2 displacement error
+    disp_fn = (x, y, z) -> lame_displacement_sphere(x, y, z;
+        p_i=p_i, r_i=r_i, r_o=r_o, E=E, nu=nu)
+    l2_abs, l2_ref = l2_disp_error_sphere(
+        U, ID, npc, nsd, npd, p_mat, n_mat_ref, KV_ref, P_ref, B_ref,
+        nen, nel, IEN, INC, NQUAD, disp_fn)
+
+    # Energy-norm error
+    en_abs, en_ref = energy_error_sphere(
+        U, ID, npc, nsd, npd, p_mat, n_mat_ref, KV_ref, P_ref, B_ref,
+        nen, nel, IEN, INC, mats, NQUAD, stress_fn)
+
+    return (U=U, lam=lam, K=K_bc, C=C, Z=Z, F=F_bc,
+            σ_abs=σ_abs, σ_ref=σ_ref, σ_rel=σ_abs/σ_ref,
+            l2_abs=l2_abs, l2_ref=l2_ref, l2_rel=l2_abs/l2_ref,
+            en_abs=en_abs, en_ref=en_ref, en_rel=en_abs/en_ref)
+end
+
 # ─────────────────────── Single-level solve ───────────────────────────────────
 
 """
-    solve_sphere(p_ord, exp_level; conforming, epss, ...) -> (err_rel, err_abs)
+    solve_sphere(p_ord, exp_level; conforming, mesh_ratio, epss, ...) -> NamedTuple
 
 Run one refinement level of the pressurized-sphere benchmark (3D Twin Mortar).
-Non-conforming: inner patch has twice as many angular elements as outer patch.
+Default parameters match Puso & Solberg (2020) §10.3: Ri=1, Ro=1.4, E=1, ν=0.3.
+Returns `(σ_rel, σ_abs, l2_rel, l2_abs, en_rel, en_abs)`.
 """
 function solve_sphere(
     p_ord::Int,
     exp_level::Int;
     conforming::Bool           = false,
+    mesh_ratio::Float64        = 2.0,
     r_i::Float64               = 1.0,
-    r_c::Float64               = 1.5,
-    r_o::Float64               = 2.0,
-    E::Float64                 = 1.0e3,
+    r_c::Float64               = 1.2,
+    r_o::Float64               = 1.4,
+    E::Float64                 = 1.0,
     nu::Float64                = 0.3,
-    p_i::Float64               = 1.0,
-    epss::Float64              = 0.0,     # 0 → auto: 1e6
+    p_i::Float64               = 0.01,
+    epss::Float64              = 0.0,     # 0 → auto: 1.0
     NQUAD::Int                 = p_ord + 1,
     NQUAD_mortar::Int          = p_ord + 2,
-    strategy::IntegrationStrategy = ElementBasedIntegration()
-)::Tuple{Float64, Float64}
+    strategy::IntegrationStrategy = ElementBasedIntegration(),
+    formulation::FormulationStrategy = TwinMortarFormulation(),
+    vtk_prefix::String         = "",
+    n_vis::Int                 = 4
+)
 
     nsd = 3; npd = 3; ned = 3; npc = 2
 
@@ -320,11 +554,11 @@ function solve_sphere(
     KV    = generate_knot_vectors(npc, npd, p_mat, n_mat)
 
     # ── h-refinement ─────────────────────────────────────────────────────────
-    # Angular: n_ang elements in outer, 2*n_ang in inner (non-conforming)
+    # Angular: n_ang elements in outer, mesh_ratio*n_ang in inner (non-conforming)
     # Radial:  n_rad elements in both patches
-    n_ang = 2^exp_level        # outer angular elements
-    n_rad = 2^exp_level        # radial elements
-    n_ang_inner = conforming ? n_ang : 2 * n_ang   # inner (finer)
+    n_ang = 2^(exp_level + 2)   # 4 at exp=0 (matches P&S §10.3 baseline)
+    n_rad = 2^exp_level         # 1 at exp=0 (1 element through thickness per patch)
+    n_ang_inner = conforming ? n_ang : round(Int, mesh_ratio * n_ang)
 
     u_ang_o = Float64[i/n_ang       for i in 1:n_ang-1]
     u_ang_i = Float64[i/n_ang_inner for i in 1:n_ang_inner-1]
@@ -343,7 +577,7 @@ function solve_sphere(
         nsd, npd, npc, n_mat, p_mat, KV, B0, P, kref_data
     )
     ncp = size(B_ref, 1)
-    epss_use = epss > 0.0 ? epss : 1.0e6
+    epss_use = epss > 0.0 ? epss : 100.0
 
     # ── Connectivity ──────────────────────────────────────────────────────────
     nel, nnp, nen = patch_metrics(npc, npd, p_mat, n_mat_ref)
@@ -391,26 +625,264 @@ function solve_sphere(
 
     K_bc, F_bc = enforce_dirichlet(Tuple{Int,Float64}[], K, F)
 
-    # ── Twin Mortar coupling at spherical interface r = r_c ──────────────────
+    # ── Mortar coupling at spherical interface r = r_c ──────────────────────
     # Patch 1 face 6 (ζ=n₃, outer radial) ↔ Patch 2 face 1 (ζ=1, inner radial)
-    pairs = [InterfacePair(1, 6, 2, 1),   # slave=Patch1(face6), master=Patch2(face1)
-             InterfacePair(2, 1, 1, 6)]   # slave=Patch2(face1), master=Patch1(face6)
-    Pc = build_interface_cps(pairs, p_mat, n_mat_ref, KV_ref, P_ref, npd, nnp)
+    pairs = formulation isa SinglePassFormulation ?
+        [InterfacePair(1, 6, 2, 1)] :
+        [InterfacePair(1, 6, 2, 1), InterfacePair(2, 1, 1, 6)]
+    Pc = build_interface_cps(pairs, p_mat, n_mat_ref, KV_ref, P_ref, npd, nnp, formulation)
 
     C, Z = build_mortar_coupling(Pc, pairs, p_mat, n_mat_ref, KV_ref, P_ref, B_ref,
                                   ID, nnp, ned, nsd, npd, neq, NQUAD_mortar, epss_use,
-                                  strategy)
+                                  strategy, formulation)
 
     # ── Solve ─────────────────────────────────────────────────────────────────
     U, _ = solve_mortar(K_bc, C, Z, F_bc)
 
     # ── L2 stress error ───────────────────────────────────────────────────────
-    err_abs, err_ref = l2_stress_error_sphere(
+    σ_abs, σ_ref = l2_stress_error_sphere(
         U, ID, npc, nsd, npd, p_mat, n_mat_ref, KV_ref, P_ref, B_ref,
         nen, nel, IEN, INC, mats, NQUAD, stress_fn
     )
 
-    return err_abs / err_ref, err_abs
+    # ── L2 displacement error ─────────────────────────────────────────────────
+    disp_fn = (x, y, z) -> lame_displacement_sphere(x, y, z;
+        p_i=p_i, r_i=r_i, r_o=r_o, E=E, nu=nu)
+    l2_abs, l2_ref = l2_disp_error_sphere(
+        U, ID, npc, nsd, npd, p_mat, n_mat_ref, KV_ref, P_ref, B_ref,
+        nen, nel, IEN, INC, NQUAD, disp_fn
+    )
+
+    # ── Energy-norm error ─────────────────────────────────────────────────────
+    en_abs, en_ref = energy_error_sphere(
+        U, ID, npc, nsd, npd, p_mat, n_mat_ref, KV_ref, P_ref, B_ref,
+        nen, nel, IEN, INC, mats, NQUAD, stress_fn
+    )
+
+    # ── Optional VTK export ────────────────────────────────────────────────
+    if !isempty(vtk_prefix)
+        write_vtk_sphere(vtk_prefix, U, ID, npc, nsd, npd,
+                          p_mat, n_mat_ref, KV_ref, P_ref, B_ref,
+                          nen, IEN, INC, E, nu;
+                          n_vis=n_vis, p_i=p_i, r_i=r_i, r_o=r_o)
+    end
+
+    return (σ_rel=σ_abs/σ_ref, σ_abs=σ_abs,
+            l2_rel=l2_abs/l2_ref, l2_abs=l2_abs,
+            en_rel=en_abs/en_ref, en_abs=en_abs)
+end
+
+# ─── VTK postprocessing ───────────────────────────────────────────────────────
+
+# Sample a knot vector at element boundaries + n_per_span interior points per span.
+if !@isdefined(_kv_sample)
+    function _kv_sample(kv_vec::AbstractVector{Float64}, n_per_span::Int)::Vector{Float64}
+        breaks = unique(kv_vec)
+        pts = Float64[]
+        for i in 1:length(breaks)-1
+            append!(pts, range(breaks[i], breaks[i+1]; length = n_per_span + 1)[1:end-1])
+        end
+        push!(pts, breaks[end])
+        return pts
+    end
+end
+
+"""
+    write_vtk_sphere(prefix, U, ID, npc, nsd, npd, p_mat, n_mat, KV, P, B,
+                     nen_vec, IEN, INC, E, nu; n_vis=4,
+                     p_i=0.01, r_i=1.0, r_o=1.4)
+
+Write one VTK STRUCTURED_GRID file per patch:  `prefix_1.vtk`, `prefix_2.vtk`, ...
+
+Point data: displacement (ux,uy,uz), stress components (σ_xx,σ_yy,σ_zz,τ_xy,τ_yz,τ_zx),
+von Mises stress, radial stress σ_rr, and exact Lamé σ_rr for comparison.
+"""
+function write_vtk_sphere(
+    prefix::String,
+    U::Vector{Float64},
+    ID::Matrix{Int},
+    npc::Int, nsd::Int, npd::Int,
+    p_mat::Matrix{Int}, n_mat::Matrix{Int},
+    KV::Vector{<:AbstractVector{<:AbstractVector{Float64}}},
+    P::Vector{Vector{Int}},
+    B::Matrix{Float64},
+    nen_vec::Vector{Int},
+    IEN::Vector{Matrix{Int}},
+    INC::Vector{<:AbstractVector{<:AbstractVector{Int}}},
+    E::Float64, nu::Float64;
+    n_vis::Int = 4,
+    p_i::Float64 = 0.01,
+    r_i::Float64 = 1.0,
+    r_o::Float64 = 1.4
+)
+    ncp = size(B, 1)
+
+    # Displacement at all control points
+    Ub = zeros(ncp, nsd)
+    for A in 1:ncp, i in 1:nsd
+        eq = ID[i, A]; eq != 0 && (Ub[A, i] = U[eq])
+    end
+
+    mat = LinearElastic(E, nu, :three_d)
+    D   = elastic_constants(mat, nsd)
+
+    for pc in 1:npc
+        pv   = p_mat[pc, :]
+        nv   = n_mat[pc, :]
+        kv   = KV[pc]
+        Ppc  = P[pc]
+        ien  = IEN[pc]
+        inc  = INC[pc]
+        nen  = nen_vec[pc]
+
+        s1 = _kv_sample(collect(kv[1]), n_vis)
+        s2 = _kv_sample(collect(kv[2]), n_vis)
+        s3 = _kv_sample(collect(kv[3]), n_vis)
+        nd1, nd2, nd3 = length(s1), length(s2), length(s3)
+        n_pts = nd1 * nd2 * nd3
+
+        pts  = zeros(3, n_pts)
+        disp = zeros(3, n_pts)
+        sxx  = zeros(n_pts); syy = zeros(n_pts); szz = zeros(n_pts)
+        sxy  = zeros(n_pts); syz = zeros(n_pts); szx = zeros(n_pts)
+        svm  = zeros(n_pts)
+        s_rr     = zeros(n_pts)
+        s_rr_ex  = zeros(n_pts)
+
+        n_elem = [nv[d] - pv[d] for d in 1:npd]
+
+        idx = 0
+        for xi3 in s3, xi2 in s2, xi1 in s1
+            idx += 1
+            Xi = [xi1, xi2, xi3]
+
+            n0 = [find_span(nv[d]-1, pv[d], Float64(Xi[d]), collect(kv[d])) for d in 1:npd]
+            e = [n0[d] - pv[d] for d in 1:npd]
+            el = (e[3]-1)*n_elem[1]*n_elem[2] + (e[2]-1)*n_elem[1] + e[1]
+
+            xi_tilde = zeros(npd)
+            for d in 1:npd
+                kv_d = collect(kv[d])
+                a, b = kv_d[n0[d]], kv_d[n0[d]+1]
+                xi_tilde[d] = (b > a) ? clamp((2*Xi[d] - a - b) / (b - a), -1.0, 1.0) : 0.0
+            end
+            # Pull slightly away from ±1 to avoid degenerate-pole Jacobian singularity.
+            # ξ direction (dir 1): pole at ξ=1 where x=y=0; safe to perturb for viz.
+            for d in 1:npd
+                xi_tilde[d] = clamp(xi_tilde[d], -1.0 + 1e-10, 1.0 - 1e-10)
+            end
+
+            local R, dR_dx, detJ
+            el_nodes = Ppc[ien[el, :]]
+            R, dR_dx, _, detJ, _ = shape_function(
+                pv, nv, kv, B, Ppc, xi_tilde,
+                nen, nsd, npd, el, n0, ien, inc
+            )
+
+            Xe = B[el_nodes, 1:nsd]
+            X  = Xe' * R
+            pts[1:nsd, idx] = X
+
+            Ue = Ub[el_nodes, :]
+            u  = Ue' * R
+            disp[1:nsd, idx] = u
+
+            if detJ > 0.0
+                dN_dX = Matrix(dR_dx')
+                B_mat = strain_displacement_matrix(nsd, nen, dN_dX)
+                u_vec = Vector{Float64}(undef, nsd * nen)
+                for a in 1:nen, d in 1:nsd; u_vec[(a-1)*nsd + d] = Ue[a, d]; end
+                sig = D * (B_mat * u_vec)  # [σxx, σyy, σzz, τxy, τyz, τzx]
+                sxx[idx] = sig[1]; syy[idx] = sig[2]; szz[idx] = sig[3]
+                sxy[idx] = sig[4]; syz[idx] = sig[5]; szx[idx] = sig[6]
+                svm[idx] = sqrt(max(0.0,
+                    0.5*((sig[1]-sig[2])^2 + (sig[2]-sig[3])^2 + (sig[3]-sig[1])^2)
+                    + 3*(sig[4]^2 + sig[5]^2 + sig[6]^2)))
+
+                # Radial stress: σ_rr = r̂ᵀ σ r̂
+                r = norm(X)
+                if r > 1e-14
+                    rhat = X / r
+                    sig_mat = [sig[1] sig[4] sig[6];
+                               sig[4] sig[2] sig[5];
+                               sig[6] sig[5] sig[3]]
+                    s_rr[idx] = dot(rhat, sig_mat * rhat)
+                    # Exact Lamé
+                    sig_ex = lame_stress_sphere(X[1], X[2], X[3];
+                                               p_i=p_i, r_i=r_i, r_o=r_o)
+                    rhat3 = [X[1], X[2], X[3]] / r
+                    s_rr_ex[idx] = dot(rhat3, sig_ex * rhat3)
+                end
+            end
+        end
+
+        fname = "$(prefix)_$(pc).vtk"
+        open(fname, "w") do f
+            println(f, "# vtk DataFile Version 2.0")
+            println(f, "Pressurized sphere patch $pc")
+            println(f, "ASCII")
+            println(f, "DATASET STRUCTURED_GRID")
+            println(f, "DIMENSIONS $nd1 $nd2 $nd3")
+            println(f, "POINTS $n_pts float")
+            for i in 1:n_pts
+                @printf f "%e\t%e\t%e\n" pts[1,i] pts[2,i] pts[3,i]
+            end
+            println(f, "POINT_DATA $n_pts")
+            println(f, "VECTORS displacement float")
+            for i in 1:n_pts
+                @printf f "%e\t%e\t%e\n" disp[1,i] disp[2,i] disp[3,i]
+            end
+            for (name, arr) in [("stress_xx", sxx), ("stress_yy", syy), ("stress_zz", szz),
+                                 ("stress_xy", sxy), ("stress_yz", syz), ("stress_zx", szx),
+                                 ("von_mises", svm), ("stress_rr", s_rr), ("stress_rr_exact", s_rr_ex)]
+                println(f, "SCALARS $name float 1")
+                println(f, "LOOKUP_TABLE default")
+                for i in 1:n_pts; @printf f "%e\n" arr[i]; end
+            end
+        end
+        @printf "  Wrote %s  (%d×%d×%d grid)\n" fname nd1 nd2 nd3
+    end
+
+    # ── Control points and control net as VTK ──────────────────────────────
+    for pc in 1:npc
+        Ppc = P[pc]
+        nv  = n_mat[pc, :]  # CPs per direction
+        n1, n2, n3 = nv[1], nv[2], nv[3]
+        n_cp = length(Ppc)
+
+        # Write control points as STRUCTURED_GRID (ParaView shows the mesh/net)
+        fname_cp = "$(prefix)_cp_$(pc).vtk"
+        open(fname_cp, "w") do f
+            println(f, "# vtk DataFile Version 2.0")
+            println(f, "Control points patch $pc")
+            println(f, "ASCII")
+            println(f, "DATASET STRUCTURED_GRID")
+            println(f, "DIMENSIONS $n1 $n2 $n3")
+            println(f, "POINTS $n_cp float")
+            # CP ordering: ξ fastest, η middle, ζ slowest — matches IGAros convention
+            for k in 1:n3, j in 1:n2, i in 1:n1
+                lin = (k-1)*n1*n2 + (j-1)*n1 + i
+                A   = Ppc[lin]
+                @printf f "%e\t%e\t%e\n" B[A,1] B[A,2] B[A,3]
+            end
+            # Deformed positions and weights as point data
+            println(f, "POINT_DATA $n_cp")
+            println(f, "SCALARS weight float 1")
+            println(f, "LOOKUP_TABLE default")
+            for k in 1:n3, j in 1:n2, i in 1:n1
+                lin = (k-1)*n1*n2 + (j-1)*n1 + i
+                A   = Ppc[lin]
+                @printf f "%e\n" B[A, end]
+            end
+            println(f, "VECTORS cp_displacement float")
+            for k in 1:n3, j in 1:n2, i in 1:n1
+                lin = (k-1)*n1*n2 + (j-1)*n1 + i
+                A   = Ppc[lin]
+                @printf f "%e\t%e\t%e\n" Ub[A,1] Ub[A,2] Ub[A,3]
+            end
+        end
+        @printf "  Wrote %s  (%d×%d×%d control net)\n" fname_cp n1 n2 n3
+    end
 end
 
 # ─────────────────────── p=1 helpers ─────────────────────────────────────────
@@ -456,8 +928,8 @@ Facet correspondence (same as higher-p sphere):
 function sphere_geometry_direct_p1(
     n_ang_i::Int, n_ang_o::Int, n_rad::Int;
     r_i::Float64 = 1.0,
-    r_c::Float64 = 1.5,
-    r_o::Float64 = 2.0
+    r_c::Float64 = 1.2,
+    r_o::Float64 = 1.4
 )::Tuple{Matrix{Float64}, Vector{Vector{Int}}}
 
     function build_patch(n_ang::Int, r_a::Float64, r_b::Float64)
@@ -497,30 +969,34 @@ faster than the O(h¹) discretisation error.
 
 Mesh sizes at refinement level `exp_level`:
   n_ang_o = 2^(exp_level+1)  (outer patch angular elements)
-  n_ang_i = 2·n_ang_o         (inner patch, non-conforming 2:1)
+  n_ang_i = mesh_ratio·n_ang_o (inner patch, non-conforming)
   n_rad   = 2^(exp_level+1)  (both patches, radial elements)
 """
 function solve_sphere_p1(
     exp_level::Int;
     conforming::Bool              = false,
+    mesh_ratio::Float64           = 2.0,
     r_i::Float64                  = 1.0,
-    r_c::Float64                  = 1.5,
-    r_o::Float64                  = 2.0,
-    E::Float64                    = 1.0e3,
+    r_c::Float64                  = 1.2,
+    r_o::Float64                  = 1.4,
+    E::Float64                    = 1.0,
     nu::Float64                   = 0.3,
-    p_i::Float64                  = 1.0,
+    p_i::Float64                  = 0.01,
     epss::Float64                 = 0.0,
     NQUAD::Int                    = 2,
     NQUAD_mortar::Int             = 3,
-    strategy::IntegrationStrategy = ElementBasedIntegration()
-)::Tuple{Float64, Float64}
+    strategy::IntegrationStrategy  = ElementBasedIntegration(),
+    formulation::FormulationStrategy = TwinMortarFormulation(),
+    vtk_prefix::String             = "",
+    n_vis::Int                     = 4
+)
 
     nsd = 3; npd = 3; ned = 3; npc = 2
     p_ord = 1
 
-    n_ang_o = 2^(exp_level + 1)
-    n_ang_i = conforming ? n_ang_o : 2 * n_ang_o
-    n_rad   = 2^(exp_level + 1)
+    n_ang_o = 2^(exp_level + 2)       # 4 at exp=0 (matches P&S §10.3 baseline)
+    n_ang_i = conforming ? n_ang_o : round(Int, mesh_ratio * n_ang_o)
+    n_rad   = 2^exp_level             # 1 at exp=0 (1 element through thickness per patch)
 
     # ── Geometry (CPs directly on sphere surface) ─────────────────────────────
     B_ref, P_ref = sphere_geometry_direct_p1(n_ang_i, n_ang_o, n_rad;
@@ -540,7 +1016,7 @@ function solve_sphere_p1(
         [kv_o, kv_o, kv_rad]
     ])
 
-    epss_use = epss > 0.0 ? epss : 1.0e9
+    epss_use = epss > 0.0 ? epss : 100.0
 
     # ── Connectivity ──────────────────────────────────────────────────────────
     nel, nnp, nen = patch_metrics(npc, npd, p_mat, n_mat_ref)
@@ -574,23 +1050,241 @@ function solve_sphere_p1(
 
     K_bc, F_bc = enforce_dirichlet(Tuple{Int,Float64}[], K, F)
 
-    # ── Twin Mortar coupling at r = r_c ───────────────────────────────────────
-    pairs = [InterfacePair(1, 6, 2, 1), InterfacePair(2, 1, 1, 6)]
-    Pc    = build_interface_cps(pairs, p_mat, n_mat_ref, KV_ref, P_ref, npd, nnp)
+    # ── Mortar coupling at r = r_c ──────────────────────────────────────────
+    pairs = formulation isa SinglePassFormulation ?
+        [InterfacePair(1, 6, 2, 1)] :
+        [InterfacePair(1, 6, 2, 1), InterfacePair(2, 1, 1, 6)]
+    Pc    = build_interface_cps(pairs, p_mat, n_mat_ref, KV_ref, P_ref, npd, nnp, formulation)
     C, Z  = build_mortar_coupling(Pc, pairs, p_mat, n_mat_ref, KV_ref, P_ref, B_ref,
                                    ID, nnp, ned, nsd, npd, neq, NQUAD_mortar, epss_use,
-                                   strategy)
+                                   strategy, formulation)
 
     # ── Solve ─────────────────────────────────────────────────────────────────
     U, _ = solve_mortar(K_bc, C, Z, F_bc)
 
     # ── L2 stress error ───────────────────────────────────────────────────────
-    err_abs, err_ref = l2_stress_error_sphere(
+    σ_abs, σ_ref = l2_stress_error_sphere(
         U, ID, npc, nsd, npd, p_mat, n_mat_ref, KV_ref, P_ref, B_ref,
         nen, nel, IEN, INC, mats, NQUAD, stress_fn
     )
 
-    return err_abs / err_ref, err_abs
+    # ── L2 displacement error ─────────────────────────────────────────────────
+    disp_fn = (x, y, z) -> lame_displacement_sphere(x, y, z;
+        p_i=p_i, r_i=r_i, r_o=r_o, E=E, nu=nu)
+    l2_abs, l2_ref = l2_disp_error_sphere(
+        U, ID, npc, nsd, npd, p_mat, n_mat_ref, KV_ref, P_ref, B_ref,
+        nen, nel, IEN, INC, NQUAD, disp_fn
+    )
+
+    # ── Energy-norm error ─────────────────────────────────────────────────────
+    en_abs, en_ref = energy_error_sphere(
+        U, ID, npc, nsd, npd, p_mat, n_mat_ref, KV_ref, P_ref, B_ref,
+        nen, nel, IEN, INC, mats, NQUAD, stress_fn
+    )
+
+    # ── Optional VTK export ────────────────────────────────────────────────
+    if !isempty(vtk_prefix)
+        write_vtk_sphere(vtk_prefix, U, ID, npc, nsd, npd,
+                          p_mat, n_mat_ref, KV_ref, P_ref, B_ref,
+                          nen, IEN, INC, E, nu;
+                          n_vis=n_vis, p_i=p_i, r_i=r_i, r_o=r_o)
+    end
+
+    return (σ_rel=σ_abs/σ_ref, σ_abs=σ_abs,
+            l2_rel=l2_abs/l2_ref, l2_abs=l2_abs,
+            en_rel=en_abs/en_ref, en_abs=en_abs)
+end
+
+# ─────────────────────── Setup helpers for cost study ─────────────────────────
+
+"""
+    _sphere_setup(p_ord, exp_level; kwargs...) -> NamedTuple
+
+Extract all arguments needed for `build_mortar_coupling` from the pressurized sphere
+benchmark at polynomial degree `p_ord` (≥2) and refinement level `exp_level`, without
+performing the mortar assembly or linear solve.  Used by `run_cost_study_sphere`.
+"""
+function _sphere_setup(
+    p_ord::Int, exp_level::Int;
+    r_i::Float64 = 1.0, r_c::Float64 = 1.2, r_o::Float64 = 1.4,
+    E::Float64 = 1.0, nu::Float64 = 0.3, p_i::Float64 = 0.01,
+    mesh_ratio::Float64 = 2.0,
+    epss::Float64 = 0.0, NQUAD::Int = p_ord + 1, NQUAD_mortar::Int = p_ord + 2,
+)
+    nsd = 3;  npd = 3;  ned = 3;  npc = 2
+
+    B0, P  = sphere_geometry(p_ord; r_i=r_i, r_c=r_c, r_o=r_o)
+    p_mat  = fill(p_ord, npc, npd)
+    n_mat  = fill(p_ord + 1, npc, npd)
+    KV     = generate_knot_vectors(npc, npd, p_mat, n_mat)
+
+    n_ang = 2^exp_level;  n_rad = 2^exp_level
+    n_ang_inner = round(Int, mesh_ratio * n_ang)
+    u_ang_o = Float64[i/n_ang       for i in 1:n_ang-1]
+    u_ang_i = Float64[i/n_ang_inner for i in 1:n_ang_inner-1]
+    u_rad   = Float64[i/n_rad       for i in 1:n_rad-1]
+    kref_data = Vector{Float64}[
+        vcat([1.0, 1.0], u_ang_i), vcat([1.0, 2.0], u_ang_i), vcat([1.0, 3.0], u_rad),
+        vcat([2.0, 1.0], u_ang_o), vcat([2.0, 2.0], u_ang_o), vcat([2.0, 3.0], u_rad),
+    ]
+    n_mat_ref, _, KV_ref, B_ref, P_ref = krefinement(
+        nsd, npd, npc, n_mat, p_mat, KV, B0, P, kref_data)
+    ncp = size(B_ref, 1)
+    epss_use = epss > 0.0 ? epss : 100.0
+
+    nel, nnp, nen = patch_metrics(npc, npd, p_mat, n_mat_ref)
+    IEN = build_ien(nsd, npd, npc, p_mat, n_mat_ref, nel, nnp, nen)
+
+    dBC = [1 3 2 1 2; 1 4 2 1 2; 2 4 2 1 2; 2 5 2 1 2; 3 2 2 1 2]
+    bc_per_dof = dirichlet_bc_control_points(p_mat, n_mat_ref, KV_ref, P_ref,
+                                              npd, nnp, ned, dBC)
+    neq, ID = build_id(bc_per_dof, ned, ncp)
+
+    pairs_tm = [InterfacePair(1, 6, 2, 1), InterfacePair(2, 1, 1, 6)]
+    pairs_sp = [InterfacePair(1, 6, 2, 1)]
+
+    # Interface element count: facet 6 of Patch 1 (ζ=n₃) → n_elem_ξ × n_elem_η
+    n_iface_slave = (n_mat_ref[1, 1] - p_ord) * (n_mat_ref[1, 2] - p_ord)
+
+    return (
+        p_mat=p_mat, n_mat_ref=n_mat_ref, KV_ref=KV_ref, P_ref=P_ref, B_ref=B_ref,
+        ID=ID, nnp=nnp, ned=ned, nsd=nsd, npd=npd, neq=neq, ncp=ncp,
+        NQUAD_mortar=NQUAD_mortar, epss=epss_use,
+        pairs_tm=pairs_tm, pairs_sp=pairs_sp,
+        n_iface_slave=n_iface_slave,
+    )
+end
+
+"""
+    _sphere_setup_p1(exp_level; kwargs...) -> NamedTuple
+
+p=1 variant of `_sphere_setup` using direct CP placement on the sphere surface.
+"""
+function _sphere_setup_p1(
+    exp_level::Int;
+    r_i::Float64 = 1.0, r_c::Float64 = 1.2, r_o::Float64 = 1.4,
+    E::Float64 = 1.0, nu::Float64 = 0.3,
+    mesh_ratio::Float64 = 2.0,
+    epss::Float64 = 0.0, NQUAD_mortar::Int = 3,
+)
+    nsd = 3;  npd = 3;  ned = 3;  npc = 2;  p_ord = 1
+
+    n_ang_o = 2^(exp_level + 1)
+    n_ang_i = round(Int, mesh_ratio * n_ang_o)
+    n_rad   = 2^(exp_level + 1)
+
+    B_ref, P_ref = sphere_geometry_direct_p1(n_ang_i, n_ang_o, n_rad;
+                                              r_i=r_i, r_c=r_c, r_o=r_o)
+    ncp   = size(B_ref, 1)
+    p_mat = fill(p_ord, npc, npd)
+    n_mat_ref = [n_ang_i+1  n_ang_i+1  n_rad+1;
+                 n_ang_o+1  n_ang_o+1  n_rad+1]
+
+    kv_i   = open_uniform_kv(n_ang_i, 1)
+    kv_o   = open_uniform_kv(n_ang_o, 1)
+    kv_rad = open_uniform_kv(n_rad,   1)
+    KV_ref = Vector{Vector{Vector{Float64}}}([
+        [kv_i, kv_i, kv_rad], [kv_o, kv_o, kv_rad]
+    ])
+
+    epss_use = epss > 0.0 ? epss : 100.0
+
+    nel, nnp, nen = patch_metrics(npc, npd, p_mat, n_mat_ref)
+    IEN = build_ien(nsd, npd, npc, p_mat, n_mat_ref, nel, nnp, nen)
+
+    dBC = [1 3 2 1 2; 1 4 2 1 2; 2 4 2 1 2; 2 5 2 1 2; 3 2 2 1 2]
+    bc_per_dof = dirichlet_bc_control_points(p_mat, n_mat_ref, KV_ref, P_ref,
+                                              npd, nnp, ned, dBC)
+    neq, ID = build_id(bc_per_dof, ned, ncp)
+
+    pairs_tm = [InterfacePair(1, 6, 2, 1), InterfacePair(2, 1, 1, 6)]
+    pairs_sp = [InterfacePair(1, 6, 2, 1)]
+
+    n_iface_slave = n_ang_i * n_ang_i   # p=1: n_elem = n_cp - 1 = n_ang
+
+    return (
+        p_mat=p_mat, n_mat_ref=n_mat_ref, KV_ref=KV_ref, P_ref=P_ref, B_ref=B_ref,
+        ID=ID, nnp=nnp, ned=ned, nsd=nsd, npd=npd, neq=neq, ncp=ncp,
+        NQUAD_mortar=NQUAD_mortar, epss=epss_use,
+        pairs_tm=pairs_tm, pairs_sp=pairs_sp,
+        n_iface_slave=n_iface_slave,
+    )
+end
+
+# ─────────────────────── Cost study ───────────────────────────────────────────
+
+"""
+    run_cost_study_sphere(; degrees, exp_levels, n_repeats, epss)
+
+Time `build_mortar_coupling` for TM (ElementBased), SPMS (SinglePass+SegmentBased),
+and DPM (DualPass+SegmentBased) on the 3D pressurized sphere benchmark.
+Prints a table suitable for §7.6 of the paper.
+"""
+function run_cost_study_sphere(;
+    degrees::Vector{Int}    = [1, 2],
+    exp_levels::Vector{Int} = [1, 2],
+    n_repeats::Int          = 5,
+    epss::Float64           = 1e6,
+    kwargs...
+)
+    configs = [
+        ("TM",   TwinMortarFormulation(),  ElementBasedIntegration()),
+        ("SPMS", SinglePassFormulation(),  SegmentBasedIntegration()),
+        ("DPM",  DualPassFormulation(),    SegmentBasedIntegration()),
+    ]
+
+    hdr = @sprintf("%-4s  %-3s  %-10s  %-9s  %-7s  %-10s",
+                   "p", "exp", "n_iface_s", "method", "t(ms)", "t/t_TM")
+    println("\n=== Interface assembly cost study (3D pressurized sphere) ===")
+    println(hdr)
+    println("-"^length(hdr))
+
+    for p_ord in degrees
+        NQUAD_mortar = p_ord + 2
+        for exp in exp_levels
+            d = if p_ord == 1
+                _sphere_setup_p1(exp; epss=epss, NQUAD_mortar=NQUAD_mortar, kwargs...)
+            else
+                _sphere_setup(p_ord, exp; epss=epss, NQUAD_mortar=NQUAD_mortar, kwargs...)
+            end
+
+            # Reference TM time (JIT warm-up + timing)
+            Pc_ref = build_interface_cps(d.pairs_tm, d.p_mat, d.n_mat_ref,
+                                          d.KV_ref, d.P_ref, d.npd, d.nnp,
+                                          TwinMortarFormulation())
+            build_mortar_coupling(Pc_ref, d.pairs_tm, d.p_mat, d.n_mat_ref,
+                d.KV_ref, d.P_ref, d.B_ref, d.ID, d.nnp, d.ned, d.nsd, d.npd, d.neq,
+                NQUAD_mortar, d.epss, ElementBasedIntegration(), TwinMortarFormulation())
+            t_tm = minimum(
+                @elapsed(build_mortar_coupling(Pc_ref, d.pairs_tm, d.p_mat, d.n_mat_ref,
+                    d.KV_ref, d.P_ref, d.B_ref, d.ID, d.nnp, d.ned, d.nsd, d.npd, d.neq,
+                    NQUAD_mortar, d.epss, ElementBasedIntegration(), TwinMortarFormulation()))
+                for _ in 1:n_repeats)
+
+            for (label, form, strat) in configs
+                pairs = form isa TwinMortarFormulation ? d.pairs_tm : d.pairs_sp
+                Pc = build_interface_cps(pairs, d.p_mat, d.n_mat_ref,
+                                          d.KV_ref, d.P_ref, d.npd, d.nnp, form)
+
+                # JIT warm-up
+                build_mortar_coupling(Pc, pairs, d.p_mat, d.n_mat_ref, d.KV_ref,
+                    d.P_ref, d.B_ref, d.ID, d.nnp, d.ned, d.nsd, d.npd, d.neq,
+                    NQUAD_mortar, d.epss, strat, form)
+
+                # Timed runs
+                t_min = minimum(
+                    @elapsed(build_mortar_coupling(Pc, pairs, d.p_mat, d.n_mat_ref,
+                        d.KV_ref, d.P_ref, d.B_ref, d.ID, d.nnp, d.ned, d.nsd, d.npd, d.neq,
+                        NQUAD_mortar, d.epss, strat, form))
+                    for _ in 1:n_repeats)
+
+                ratio = label == "TM" ? 1.0 : t_min / t_tm
+                @printf("%-4d  %-3d  %-10d  %-9s  %-7.2f  %-10.2f\n",
+                        p_ord, exp, d.n_iface_slave, label, t_min*1000, ratio)
+            end
+            println()
+        end
+    end
 end
 
 # ─────────────────────── p=1 convergence table ────────────────────────────────
@@ -599,24 +1293,29 @@ end
     run_convergence_sphere_p1(; exp_range, kwargs...) -> nothing
 
 Print a convergence table for the p=1 pressurized sphere benchmark.
+Reports L2-displacement, energy-norm, and L2-stress errors with rates.
 """
 function run_convergence_sphere_p1(;
     exp_range::UnitRange{Int} = 0:3,
     kwargs...
 )
-    @printf("\n─── p = 1  (direct mesh) ──────────────────────────────\n")
-    @printf("  %5s  %12s  %12s  %6s\n", "exp", "||e||_L2", "h", "rate")
-    prev_err = NaN
+    @printf("\n─── p = 1  (direct mesh) ──────────────────────────────────────────────────────────────\n")
+    @printf("  %5s  %12s  %6s  %12s  %6s  %12s  %6s  %8s\n",
+            "exp", "||e||_disp", "rate", "||e||_energy", "rate", "||e||_σ", "rate", "h")
+    prev_d = prev_e = prev_s = NaN
     for e in exp_range
-        h = 1.0 / 2^(e + 1)   # outer angular element size = 1/n_ang_o
+        h = 1.0 / 2^(e + 1)
         try
-            rel, abs_err = solve_sphere_p1(e; kwargs...)
-            rate = isnan(prev_err) ? NaN : log(prev_err/abs_err) / log(2.0)
-            @printf("  %5d  %12.4e  %12.4e  %6.2f\n", e, abs_err, h, rate)
-            prev_err = abs_err
+            r = solve_sphere_p1(e; kwargs...)
+            rd = isnan(prev_d) ? NaN : log(prev_d/r.l2_abs) / log(2.0)
+            re = isnan(prev_e) ? NaN : log(prev_e/r.en_abs) / log(2.0)
+            rs = isnan(prev_s) ? NaN : log(prev_s/r.σ_abs)  / log(2.0)
+            @printf("  %5d  %12.4e  %6.2f  %12.4e  %6.2f  %12.4e  %6.2f  %8.4f\n",
+                    e, r.l2_abs, rd, r.en_abs, re, r.σ_abs, rs, h)
+            prev_d = r.l2_abs; prev_e = r.en_abs; prev_s = r.σ_abs
         catch ex
             @printf("  %5d  ERROR: %s\n", e, string(ex)[1:min(60,end)])
-            prev_err = NaN
+            prev_d = prev_e = prev_s = NaN
         end
     end
 end
@@ -627,6 +1326,7 @@ end
     run_convergence_sphere(; degrees, exp_range, kwargs...) -> nothing
 
 Print a convergence table for the pressurized sphere benchmark.
+Reports L2-displacement, energy-norm, and L2-stress errors with rates.
 """
 function run_convergence_sphere(;
     degrees::Vector{Int} = [2, 3, 4],
@@ -634,19 +1334,89 @@ function run_convergence_sphere(;
     kwargs...
 )
     for p in degrees
-        @printf("\n─── p = %d ─────────────────────────────────────────\n", p)
-        @printf("  %5s  %12s  %12s  %6s\n", "exp", "||e||_L2", "h", "rate")
-        prev_err = NaN
+        @printf("\n─── p = %d ─────────────────────────────────────────────────────────────────────────────\n", p)
+        @printf("  %5s  %12s  %6s  %12s  %6s  %12s  %6s  %8s\n",
+                "exp", "||e||_disp", "rate", "||e||_energy", "rate", "||e||_σ", "rate", "h")
+        prev_d = prev_e = prev_s = NaN
         for e in exp_range
-            h = 0.5^e    # characteristic angular element size (outer patch)
+            h = 0.5^e
             try
-                rel, abs_err = solve_sphere(p, e; kwargs...)
-                rate = isnan(prev_err) ? NaN : log(prev_err/abs_err) / log(2.0)
-                @printf("  %5d  %12.4e  %12.4e  %6.2f\n", e, abs_err, h, rate)
-                prev_err = abs_err
+                r = solve_sphere(p, e; kwargs...)
+                rd = isnan(prev_d) ? NaN : log(prev_d/r.l2_abs) / log(2.0)
+                re = isnan(prev_e) ? NaN : log(prev_e/r.en_abs) / log(2.0)
+                rs = isnan(prev_s) ? NaN : log(prev_s/r.σ_abs)  / log(2.0)
+                @printf("  %5d  %12.4e  %6.2f  %12.4e  %6.2f  %12.4e  %6.2f  %8.4f\n",
+                        e, r.l2_abs, rd, r.en_abs, re, r.σ_abs, rs, h)
+                prev_d = r.l2_abs; prev_e = r.en_abs; prev_s = r.σ_abs
             catch ex
                 @printf("  %5d  ERROR: %s\n", e, string(ex)[1:min(60,end)])
-                prev_err = NaN
+                prev_d = prev_e = prev_s = NaN
+            end
+        end
+    end
+end
+
+# ─────────────────────── ε-sensitivity study ──────────────────────────────────
+
+"""
+    run_eps_sweep_sphere(; degrees, exp_range, epss_range, mesh_ratios, kwargs...)
+
+Sweep stabilization parameter ε for a range of mesh refinements and mesh ratios.
+Matches the format of Puso & Solberg (2020) §10.3 Fig. 13.
+Reports energy-norm and L2-displacement relative errors.
+"""
+function run_eps_sweep_sphere(;
+    degrees::Vector{Int}       = [2, 3],
+    exp_range::UnitRange{Int}  = 0:3,
+    epss_range::Vector{Float64} = [0.01, 0.1, 1.0, 10.0, 100.0],
+    mesh_ratios::Vector{Float64} = [2.0, 3.5],
+    kwargs...
+)
+    for mr in mesh_ratios
+        @printf("\n\n═══ mesh ratio = %.1f:1 ═══════════════════════════════════════════\n", mr)
+        for p in degrees
+            @printf("\n─── p = %d ─────────────────────────────────\n", p)
+            @printf("  %5s", "exp")
+            for eps in epss_range
+                @printf("  ε=%-8.2g", eps)
+            end
+            println()
+
+            # Energy norm
+            @printf("  %5s", "")
+            for _ in epss_range; @printf("  %-10s", "en_rel"); end
+            println()
+
+            for e in exp_range
+                @printf("  %5d", e)
+                for eps in epss_range
+                    try
+                        r = solve_sphere(p, e; epss=eps, mesh_ratio=mr, kwargs...)
+                        @printf("  %10.3e", r.en_rel)
+                    catch ex
+                        @printf("  %10s", "ERR")
+                    end
+                end
+                println()
+            end
+
+            # Displacement norm
+            println()
+            @printf("  %5s", "")
+            for _ in epss_range; @printf("  %-10s", "l2_rel"); end
+            println()
+
+            for e in exp_range
+                @printf("  %5d", e)
+                for eps in epss_range
+                    try
+                        r = solve_sphere(p, e; epss=eps, mesh_ratio=mr, kwargs...)
+                        @printf("  %10.3e", r.l2_rel)
+                    catch ex
+                        @printf("  %10s", "ERR")
+                    end
+                end
+                println()
             end
         end
     end

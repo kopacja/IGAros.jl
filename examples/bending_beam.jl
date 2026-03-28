@@ -416,6 +416,152 @@ function l2_disp_error_beam(
     return sqrt(err2), sqrt(ref2)
 end
 
+# ─── Energy-norm error (3D) ──────────────────────────────────────────────────
+
+"""
+    energy_error_beam(U, ID, npc, nsd, npd, p, n, KV, P, B,
+                      nen, nel, IEN, INC, materials, NQUAD,
+                      stress_fn) -> (err_abs, err_ref)
+
+Energy-norm error against an exact stress field:
+  err_abs² = ∫_Ω (σ_h − σ_ex) : D⁻¹ : (σ_h − σ_ex) dΩ
+  err_ref² = ∫_Ω σ_ex : D⁻¹ : σ_ex dΩ
+where D is the 6×6 3D elasticity tensor (Voigt ordering: xx,yy,zz,yz,xz,xy).
+stress_fn(x,y,z) must return a 3×3 symmetric stress tensor.
+"""
+function energy_error_beam(
+    U::Vector{Float64},
+    ID::Matrix{Int},
+    npc::Int, nsd::Int, npd::Int,
+    p::Matrix{Int}, n::Matrix{Int},
+    KV::Vector{<:AbstractVector{<:AbstractVector{Float64}}},
+    P::Vector{Vector{Int}},
+    B::Matrix{Float64},
+    nen::Vector{Int}, nel::Vector{Int},
+    IEN::Vector{Matrix{Int}},
+    INC::Vector{<:AbstractVector{<:AbstractVector{Int}}},
+    materials::Vector{LinearElastic},
+    NQUAD::Int,
+    stress_fn::Function   # (x, y, z) -> 3×3 exact stress matrix
+)::Tuple{Float64, Float64}
+
+    ncp = size(B, 1)
+    Ub  = zeros(ncp, nsd)
+    for A in 1:ncp, i in 1:nsd
+        eq = ID[i, A]; eq != 0 && (Ub[A, i] = U[eq])
+    end
+
+    err2 = 0.0; ref2 = 0.0
+    GPW  = gauss_product(NQUAD, npd)
+
+    for pc in 1:npc
+        ien  = IEN[pc]; inc = INC[pc]
+        D    = elastic_constants(materials[pc], nsd)  # 6×6
+        Dinv = inv(D)
+
+        for el in 1:nel[pc]
+            anchor = ien[el, 1]
+            n0     = inc[anchor]
+
+            for (gp, gw) in GPW
+                R_s, dR_dx, _, detJ, _ = shape_function(
+                    p[pc,:], n[pc,:], KV[pc], B, P[pc], gp,
+                    nen[pc], nsd, npd, el, n0, ien, inc
+                )
+                detJ <= 0 && continue
+                gwJ = gw * detJ
+
+                B0    = strain_displacement_matrix(nsd, nen[pc], dR_dx')
+                Ue    = vec(Ub[P[pc][ien[el,:]], 1:nsd]')
+                σ_h_v = D * (B0 * Ue)  # Voigt [σxx,σyy,σzz,τyz,τxz,τxy]
+
+                Xe = B[P[pc][ien[el,:]], :]
+                X  = Xe' * R_s
+                σ_ex   = stress_fn(X[1], X[2], X[3])
+                σ_ex_v = [σ_ex[1,1], σ_ex[2,2], σ_ex[3,3],
+                           σ_ex[2,3], σ_ex[1,3], σ_ex[1,2]]
+
+                Δσ_v = σ_h_v - σ_ex_v
+                err2 += dot(Δσ_v, Dinv * Δσ_v) * gwJ
+                ref2 += dot(σ_ex_v, Dinv * σ_ex_v) * gwJ
+            end
+        end
+    end
+
+    return sqrt(err2), sqrt(ref2)
+end
+
+# ─── Diagnostic solver (returns K, C, Z for conditioning analysis) ───────────
+
+"""
+    solve_beam_diag(p_ord, exp_level; kwargs...) -> NamedTuple
+
+Like `solve_beam` but returns the full KKT components (K, C, Z) and both
+L2-displacement and energy-norm errors.
+"""
+function solve_beam_diag(
+    p_ord::Int, exp_level::Int;
+    formulation::FormulationStrategy = TwinMortarFormulation(),
+    strategy::IntegrationStrategy    = ElementBasedIntegration(),
+    normal_strategy::NormalStrategy  = SlaveNormal(),
+    kwargs...
+)
+    d = p_ord == 1 ? _beam_setup_p1(exp_level; kwargs...) :
+                     _beam_setup(p_ord, exp_level; kwargs...)
+    nsd = d.nsd; ned = d.ned; npd = d.npd
+
+    pairs = formulation isa SinglePassFormulation ? d.pairs_sp : d.pairs_tm
+    Pc = build_interface_cps(pairs, d.p_mat, d.n_mat_ref, d.KV_ref, d.P_ref,
+                              npd, d.nnp, formulation)
+    C, Z = build_mortar_coupling(Pc, pairs, d.p_mat, d.n_mat_ref, d.KV_ref,
+                                  d.P_ref, d.B_ref, d.ID, d.nnp, ned, nsd, npd,
+                                  d.neq, d.NQUAD_mortar, d.epss, strategy,
+                                  formulation, normal_strategy)
+
+    # Zero C rows for non-homogeneous Dirichlet DOFs (from enforce_dirichlet)
+    fixed_eqs = Set(A for (A, _) in d.IND)
+    K_bc = d.K_bc; F_bc = d.F_bc
+    rows_C, cols_C, vals_C = findnz(C)
+    keep  = [i for i in eachindex(rows_C) if !(rows_C[i] in fixed_eqs)]
+    C_bc  = sparse(rows_C[keep], cols_C[keep], vals_C[keep], size(C,1), size(C,2))
+
+    _, cols_nz, _ = findnz(C_bc)
+    active_lm = sort(unique(cols_nz))
+    if length(active_lm) < size(C_bc, 2)
+        C_bc = C_bc[:, active_lm]; Z = Z[active_lm, active_lm]
+    end
+
+    U, lam = solve_mortar(K_bc, C_bc, Z, F_bc)
+
+    # L2 displacement error
+    p_load = get(kwargs, :p_load, 10.0)
+    E_val  = get(kwargs, :E, 1000.0)
+    l_x    = get(kwargs, :l_x, 8.0)
+    l_y    = get(kwargs, :l_y, 2.0)
+    nu_val = get(kwargs, :nu, 0.0)
+    disp_fn = (x, y, z) -> beam_exact_disp(x, y, z; p_load=p_load, E=E_val,
+                                             l_x=l_x, l_y=l_y, nu=nu_val)
+    l2_abs, l2_ref = l2_disp_error_beam(
+        U, d.ID, 2, nsd, npd, d.p_mat, d.n_mat_ref, d.KV_ref, d.P_ref, d.B_ref,
+        d.nen, d.nel, d.IEN, d.INC, d.NQUAD, disp_fn
+    )
+
+    # Energy-norm error
+    stress_fn = (x, y, z) -> begin
+        σ = zeros(3, 3)
+        σ[1, 1] = 2 * p_load * y / l_y
+        σ
+    end
+    en_abs, en_ref = energy_error_beam(
+        U, d.ID, 2, nsd, npd, d.p_mat, d.n_mat_ref, d.KV_ref, d.P_ref, d.B_ref,
+        d.nen, d.nel, d.IEN, d.INC, d.mats, d.NQUAD, stress_fn
+    )
+
+    return (U=U, lam=lam, K=K_bc, C=C_bc, Z=Z, F=F_bc,
+            l2_abs=l2_abs, l2_ref=l2_ref, l2_rel=l2_abs/l2_ref,
+            en_abs=en_abs, en_ref=en_ref, en_rel=en_abs/en_ref)
+end
+
 # ─── VTK postprocessing ───────────────────────────────────────────────────────
 
 # Sample a knot vector at element boundaries + n_per_span interior points per span.
@@ -1037,7 +1183,7 @@ function _beam_setup_p1(
     return (
         p_mat=p_mat, n_mat_ref=n_mat_ref, KV_ref=KV_ref, P_ref=P_ref, B_ref=B_ref,
         ID=ID, nnp=nnp, ned=ned, nsd=nsd, npd=npd, neq=neq, ncp=ncp,
-        K_bc=K_bc, F_bc=F_bc, NQUAD=NQUAD, NQUAD_mortar=NQUAD_mortar,
+        K_bc=K_bc, F_bc=F_bc, IND=IND, NQUAD=NQUAD, NQUAD_mortar=NQUAD_mortar,
         epss=epss_use, nen=nen, nel=nel, IEN=IEN, INC=INC, mats=mats,
         pairs_tm=pairs_tm, pairs_sp=pairs_sp,
         n_iface_slave=n_iface_slave, n_iface_master=n_iface_master,
@@ -1144,7 +1290,7 @@ function _beam_setup(
     return (
         p_mat=p_mat, n_mat_ref=n_mat_ref, KV_ref=KV_ref, P_ref=P_ref, B_ref=B_ref,
         ID=ID, nnp=nnp, ned=ned, nsd=nsd, npd=npd, neq=neq, ncp=ncp,
-        K_bc=K_bc, F_bc=F_bc, NQUAD=NQUAD, NQUAD_mortar=NQUAD_mortar,
+        K_bc=K_bc, F_bc=F_bc, IND=IND, NQUAD=NQUAD, NQUAD_mortar=NQUAD_mortar,
         epss=epss_use, nen=nen, nel=nel, IEN=IEN, INC=INC, mats=mats,
         pairs_tm=pairs_tm, pairs_sp=pairs_sp,
         n_iface_slave=n_iface_slave, n_iface_master=n_iface_master,

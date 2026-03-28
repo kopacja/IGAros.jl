@@ -210,18 +210,16 @@ function multiple_knot_insertion(
     Pq = build_patch_numbering(pd, npd, n_new)
     npcp = prod(n_new; init=1)
 
-    tol = 1e-5
-    P_new = copy(P)
-    # Resize P_new to hold npcp entries
+    tol = 1e-10
     P_new = zeros(Int, npcp)
     Bw_new = copy(Bw)
 
     for i in 1:npcp
-        x = Qwp[Pq[i], 1:nsd] ./ Qwp[Pq[i], end]   # physical coords
+        xw = Qwp[Pq[i], :]   # full homogeneous coords including weight
         found = false
         for j in 1:size(Bw_new, 1)
-            y = Bw_new[j, 1:nsd] ./ Bw_new[j, end]  # physical coords
-            if norm(x .- y) <= tol
+            yw = Bw_new[j, :]
+            if norm(xw .- yw) <= tol * (1.0 + norm(xw))
                 P_new[i] = j
                 found = true
                 break

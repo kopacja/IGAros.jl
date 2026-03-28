@@ -380,10 +380,11 @@ end
 # ─────────────────────── Single-level solve ───────────────────────────────────
 
 """
-    solve_cylinder(p_ord, exp_level; conforming, epss, ...) -> (err_rel, err_abs)
+    solve_cylinder(p_ord, exp_level; ...) -> NTuple{6, Float64}
 
 Run one refinement level of the concentric-cylinder benchmark.
 Non-conforming: Patch 1 (inner) has twice as many angular elements as Patch 2.
+Returns `(l2_stress_rel, l2_stress_abs, l2_disp_rel, l2_disp_abs, en_rel, en_abs)`.
 """
 function solve_cylinder(
     p_ord::Int,
@@ -402,7 +403,7 @@ function solve_cylinder(
     formulation::FormulationStrategy = TwinMortarFormulation(),
     n_ang_p2_base::Int = 3,   # outer-patch angular base (h ∝ 1/(base·2^exp))
     n_ang_p1_base::Int = 6,   # inner-patch angular base (2:1 by default)
-)::NTuple{4, Float64}   # (l2_stress_rel, l2_stress_abs, l2_disp_rel, l2_disp_abs)
+)::NTuple{6, Float64}
 
     nsd = 2; npd = 2; ned = 2; npc = 2
     thickness = 1.0
@@ -513,7 +514,13 @@ function solve_cylinder(
         nen, nel, IEN, INC, NQUAD, thickness, disp_fn
     )
 
-    return s_abs / s_ref, s_abs, d_abs / d_ref, d_abs
+    # ── Energy-norm error ──────────────────────────────────────────────────────
+    en_abs, en_ref = energy_error_cyl(
+        U, ID, npc, nsd, npd, p_mat, n_mat_ref, KV_ref, P_ref, B_ref,
+        nen, nel, IEN, INC, mats, NQUAD, thickness, stress_fn
+    )
+
+    return s_abs / s_ref, s_abs, d_abs / d_ref, d_abs, en_abs / en_ref, en_abs
 end
 
 # ─────────────────────── Reference-solution convergence ───────────────────────
@@ -947,12 +954,14 @@ function cylinder_geometry_direct_p1(
 end
 
 """
-    solve_cylinder_p1(exp_level; conforming, epss, ...) -> (err_rel, err_abs)
+    solve_cylinder_p1(exp_level; ...) -> NTuple{6, Float64}
 
 Concentric-cylinder benchmark with **p=1 bilinear elements**.
 CPs are placed directly on the circle arcs at each refinement level
 (not obtained by knot insertion), so geometry error is O(h²) and the
 O(h¹) mortar/discretisation error dominates — enabling proper convergence study.
+
+Returns `(l2_stress_rel, l2_stress_abs, l2_disp_rel, l2_disp_abs, en_rel, en_abs)`.
 
 Mesh sizes match the p>1 solver:
   n_ang_p2 = 3·2^exp_level  (Patch 2, angular elements)
@@ -975,7 +984,7 @@ function solve_cylinder_p1(
     formulation::FormulationStrategy = TwinMortarFormulation(),
     n_ang_p2_base::Int    = 3,     # base angular elements for outer patch
     n_ang_p1_base::Int    = 6,     # base angular elements for inner patch (non-conforming)
-)::NTuple{4, Float64}   # (L2_rel, L2_abs, E_rel, E_abs)
+)::NTuple{6, Float64}
 
     nsd = 2; npd = 2; ned = 2; npc = 2; thickness = 1.0
 
@@ -1033,24 +1042,33 @@ function solve_cylinder_p1(
 
     U, _ = solve_mortar(K_bc, C, Z, F_bc)
 
-    # ── L2 and energy-norm stress errors vs Lamé ─────────────────────────────
+    # ── L2 stress error vs Lamé ──────────────────────────────────────────────
     l2_abs, l2_ref = l2_stress_error_cyl(
         U, ID, npc, nsd, npd, p_mat, n_mat, KV, P, B,
         nen, nel, IEN, INC, mats, NQUAD, thickness, stress_fn)
+
+    # ── L2 displacement error ─────────────────────────────────────────────────
+    disp_fn = (x, y) -> lame_displacement(x, y; p_o=p_o, r_i=r_i, r_o=r_o, E=E, nu=nu)
+    d_abs, d_ref = l2_disp_error_cyl(
+        U, ID, npc, nsd, npd, p_mat, n_mat, KV, P, B,
+        nen, nel, IEN, INC, NQUAD, thickness, disp_fn)
+
+    # ── Energy-norm error ──────────────────────────────────────────────────────
     en_abs, en_ref = energy_error_cyl(
         U, ID, npc, nsd, npd, p_mat, n_mat, KV, P, B,
         nen, nel, IEN, INC, mats, NQUAD, thickness, stress_fn)
 
-    return l2_abs / l2_ref, l2_abs, en_abs / en_ref, en_abs
+    return l2_abs / l2_ref, l2_abs, d_abs / d_ref, d_abs, en_abs / en_ref, en_abs
 end
 
 """
-    solve_cylinder_p1_single(exp_level; ...) -> (L2_rel, L2_abs, E_rel, E_abs)
+    solve_cylinder_p1_single(exp_level; ...) -> NTuple{6, Float64}
 
 Concentric-cylinder benchmark on a **single p=1 patch** (no interface).
 CPs are placed directly on the arcs; n_ang = 3·2^exp angular elements,
 n_rad = 4·2^exp radial elements covering r_i → r_o in one patch.
 Serves as the reference "no-interface" convergence baseline.
+Returns `(l2_stress_rel, l2_stress_abs, l2_disp_rel, l2_disp_abs, en_rel, en_abs)`.
 """
 function solve_cylinder_p1_single(
     exp_level::Int;
@@ -1060,7 +1078,7 @@ function solve_cylinder_p1_single(
     nu::Float64  = 0.3,
     p_o::Float64 = 1.0,
     NQUAD::Int   = 2,
-)::NTuple{4, Float64}
+)::NTuple{6, Float64}
 
     nsd = 2; npd = 2; ned = 2; npc = 1; thickness = 1.0
 
@@ -1121,11 +1139,15 @@ function solve_cylinder_p1_single(
     l2_abs, l2_ref = l2_stress_error_cyl(
         U, ID, npc, nsd, npd, p_mat, n_mat, KV, P, B,
         nen, nel, IEN, INC, mats, NQUAD, thickness, stress_fn)
+    disp_fn = (x, y) -> lame_displacement(x, y; p_o=p_o, r_i=r_i, r_o=r_o, E=E, nu=nu)
+    d_abs, d_ref = l2_disp_error_cyl(
+        U, ID, npc, nsd, npd, p_mat, n_mat, KV, P, B,
+        nen, nel, IEN, INC, NQUAD, thickness, disp_fn)
     en_abs, en_ref = energy_error_cyl(
         U, ID, npc, nsd, npd, p_mat, n_mat, KV, P, B,
         nen, nel, IEN, INC, mats, NQUAD, thickness, stress_fn)
 
-    return l2_abs / l2_ref, l2_abs, en_abs / en_ref, en_abs
+    return l2_abs / l2_ref, l2_abs, d_abs / d_ref, d_abs, en_abs / en_ref, en_abs
 end
 
 """
@@ -1300,6 +1322,186 @@ function cylinder_p1_kappa(
 end
 
 """
+    cylinder_kappa(p_ord, exp_level; formulation, strategy, epss, ...) -> (κ, n_mult)
+
+Build the cylinder system for arbitrary p (p≥2 uses k-refinement) and return
+the condition number κ(A) of the full augmented matrix [K, C; Cᵀ, -Z].
+For p=1, delegates to `cylinder_p1_kappa`.
+"""
+function cylinder_kappa(
+    p_ord::Int, exp_level::Int;
+    formulation::FormulationStrategy = TwinMortarFormulation(),
+    strategy::IntegrationStrategy    = ElementBasedIntegration(),
+    epss::Float64      = 1e6,
+    conforming::Bool   = false,
+    r_i::Float64 = 1.0, r_c::Float64 = 1.5, r_o::Float64 = 2.0,
+    E::Float64   = 100.0, nu::Float64 = 0.3, p_o::Float64 = 1.0,
+    NQUAD::Int          = p_ord + 1,
+    NQUAD_mortar::Int   = p_ord + 2,
+    n_ang_p2_base::Int  = 3,
+    n_ang_p1_base::Int  = 6,
+)::Tuple{Float64,Int}
+
+    if p_ord == 1
+        return cylinder_p1_kappa(exp_level;
+            formulation=formulation, strategy=strategy, epss=epss,
+            conforming=conforming, r_i=r_i, r_c=r_c, r_o=r_o,
+            E=E, nu=nu, p_o=p_o, NQUAD=NQUAD, NQUAD_mortar=NQUAD_mortar,
+            n_ang_p2_base=n_ang_p2_base, n_ang_p1_base=n_ang_p1_base)
+    end
+
+    nsd = 2; npd = 2; ned = 2; npc = 2; thickness = 1.0
+
+    # ── Geometry (same as solve_cylinder) ──────────────────────────────────
+    B0, P = cylinder_geometry(p_ord; r_i=r_i, r_c=r_c, r_o=r_o)
+    p_mat = fill(p_ord, npc, npd)
+    n_mat = fill(p_ord + 1, npc, npd)
+    KV    = generate_knot_vectors(npc, npd, p_mat, n_mat)
+
+    s_ang    = 1.0 / (n_ang_p2_base * 2^exp_level)
+    s_ang_nc = 1.0 / (n_ang_p1_base * 2^exp_level)
+    s_rad    = (1/2) / 2^exp_level
+
+    u_ang    = collect(s_ang    : s_ang    : 1 - s_ang/2)
+    u_ang_nc = collect(s_ang_nc : s_ang_nc : 1 - s_ang_nc/2)
+    u_rad    = collect(s_rad    : s_rad    : 1 - s_rad/2)
+
+    epss_use = epss > 0.0 ? epss : 1e4
+
+    kref_data = Vector{Float64}[
+        vcat([1.0, 1.0], conforming ? u_ang : u_ang_nc),
+        vcat([2.0, 1.0], u_ang),
+        vcat([1.0, 2.0], u_rad),
+        vcat([2.0, 2.0], u_rad),
+    ]
+
+    B0_hack = copy(B0)
+    B0_hack[P[1], 2] .+= 1000.0
+
+    n_mat_ref, _, KV_ref, B_hack_ref, P_ref = krefinement(
+        nsd, npd, npc, n_mat, p_mat, KV, B0_hack, P, kref_data)
+
+    B_ref = copy(B_hack_ref)
+    for i in axes(B_ref, 1)
+        B_ref[i, 2] > 100.0 && (B_ref[i, 2] -= 1000.0)
+    end
+    ncp = size(B_ref, 1)
+
+    # ── Connectivity + BCs ────────────────────────────────────────────────
+    nel, nnp, nen = patch_metrics(npc, npd, p_mat, n_mat_ref)
+    IEN = build_ien(nsd, npd, npc, p_mat, n_mat_ref, nel, nnp, nen)
+
+    dBC = [1 4 2 1 2; 2 2 2 1 2]
+    bc_per_dof = dirichlet_bc_control_points(p_mat, n_mat_ref, KV_ref, P_ref,
+                                              npd, nnp, ned, dBC)
+    neq, ID = build_id(bc_per_dof, ned, ncp)
+    LM      = build_lm(nen, ned, npc, nel, ID, IEN, P_ref)
+
+    # ── Stiffness ─────────────────────────────────────────────────────────
+    mats = [LinearElastic(E, nu, :plane_strain), LinearElastic(E, nu, :plane_strain)]
+    INC  = [build_inc(n_mat_ref[pc, :]) for pc in 1:npc]
+    K, _ = build_stiffness_matrix(npc, nsd, npd, ned, neq,
+                                   p_mat, n_mat_ref, KV_ref, P_ref, B_ref,
+                                   zeros(ncp, nsd),
+                                   nen, nel, IEN, INC, LM, mats, NQUAD, thickness)
+    K_bc, _ = enforce_dirichlet(Tuple{Int,Float64}[], K, zeros(neq))
+
+    # ── Mortar coupling ───────────────────────────────────────────────────
+    pairs_tm = [InterfacePair(1, 3, 2, 1), InterfacePair(2, 1, 1, 3)]
+    pairs_sp = [InterfacePair(1, 3, 2, 1)]
+    pairs = formulation isa SinglePassFormulation ? pairs_sp : pairs_tm
+
+    Pc = build_interface_cps(pairs, p_mat, n_mat_ref, KV_ref, P_ref, npd, nnp, formulation)
+    C, Z = build_mortar_coupling(Pc, pairs, p_mat, n_mat_ref, KV_ref, P_ref, B_ref,
+                                  ID, nnp, ned, nsd, npd, neq, NQUAD_mortar, epss_use,
+                                  strategy, formulation)
+
+    κ = compute_kappa(K_bc, C, Z)
+    return κ, size(C, 2)
+end
+
+"""
+    cylinder_matrices(p_ord, exp_level; epss, ...) -> (K_bc, C, Z)
+
+Build the cylinder system and return the raw matrices for spectral analysis.
+For p=1 uses direct mesh; for p≥2 uses k-refinement.
+"""
+function cylinder_matrices(
+    p_ord::Int, exp_level::Int;
+    formulation::FormulationStrategy = TwinMortarFormulation(),
+    strategy::IntegrationStrategy    = ElementBasedIntegration(),
+    epss::Float64      = 1e6,
+    conforming::Bool   = false,
+    r_i::Float64 = 1.0, r_c::Float64 = 1.5, r_o::Float64 = 2.0,
+    E::Float64   = 100.0, nu::Float64 = 0.3,
+    NQUAD::Int          = p_ord + 1,
+    NQUAD_mortar::Int   = p_ord + 2,
+    n_ang_p2_base::Int  = 3,
+    n_ang_p1_base::Int  = 6,
+)
+    nsd = 2; npd = 2; ned = 2; npc = 2; thickness = 1.0
+
+    if p_ord == 1
+        n_ang_p2 = n_ang_p2_base * 2^exp_level
+        n_ang_p1 = conforming ? n_ang_p2 : n_ang_p1_base * 2^exp_level
+        n_rad    = 2 * 2^exp_level
+        B, P, p_mat, n_mat, KV = cylinder_geometry_direct_p1(
+            n_ang_p1, n_ang_p2, n_rad; r_i=r_i, r_c=r_c, r_o=r_o)
+        n_mat_ref = n_mat; KV_ref = KV; B_ref = B; P_ref = P
+    else
+        B0, P = cylinder_geometry(p_ord; r_i=r_i, r_c=r_c, r_o=r_o)
+        p_mat = fill(p_ord, npc, npd)
+        n_mat = fill(p_ord + 1, npc, npd)
+        KV    = generate_knot_vectors(npc, npd, p_mat, n_mat)
+        s_ang    = 1.0 / (n_ang_p2_base * 2^exp_level)
+        s_ang_nc = 1.0 / (n_ang_p1_base * 2^exp_level)
+        s_rad    = (1/2) / 2^exp_level
+        u_ang    = collect(s_ang    : s_ang    : 1 - s_ang/2)
+        u_ang_nc = collect(s_ang_nc : s_ang_nc : 1 - s_ang_nc/2)
+        u_rad    = collect(s_rad    : s_rad    : 1 - s_rad/2)
+        kref_data = Vector{Float64}[
+            vcat([1.0, 1.0], conforming ? u_ang : u_ang_nc),
+            vcat([2.0, 1.0], u_ang),
+            vcat([1.0, 2.0], u_rad),
+            vcat([2.0, 2.0], u_rad),
+        ]
+        B0_hack = copy(B0); B0_hack[P[1], 2] .+= 1000.0
+        n_mat_ref, _, KV_ref, B_hack_ref, P_ref = krefinement(
+            nsd, npd, npc, n_mat, p_mat, KV, B0_hack, P, kref_data)
+        B_ref = copy(B_hack_ref)
+        for i in axes(B_ref, 1)
+            B_ref[i, 2] > 100.0 && (B_ref[i, 2] -= 1000.0)
+        end
+    end
+
+    ncp = size(B_ref, 1)
+    nel, nnp, nen = patch_metrics(npc, npd, p_mat, n_mat_ref)
+    IEN = build_ien(nsd, npd, npc, p_mat, n_mat_ref, nel, nnp, nen)
+    dBC = [1 4 2 1 2; 2 2 2 1 2]
+    bc_per_dof = dirichlet_bc_control_points(p_mat, n_mat_ref, KV_ref, P_ref,
+                                              npd, nnp, ned, dBC)
+    neq, ID = build_id(bc_per_dof, ned, ncp)
+    LM      = build_lm(nen, ned, npc, nel, ID, IEN, P_ref)
+    mats = [LinearElastic(E, nu, :plane_strain), LinearElastic(E, nu, :plane_strain)]
+    INC  = [build_inc(n_mat_ref[pc, :]) for pc in 1:npc]
+    K, _ = build_stiffness_matrix(npc, nsd, npd, ned, neq,
+                                   p_mat, n_mat_ref, KV_ref, P_ref, B_ref,
+                                   zeros(ncp, nsd),
+                                   nen, nel, IEN, INC, LM, mats, NQUAD, thickness)
+    K_bc, _ = enforce_dirichlet(Tuple{Int,Float64}[], K, zeros(neq))
+
+    epss_use = epss > 0.0 ? epss : 1e4
+    pairs_tm = [InterfacePair(1, 3, 2, 1), InterfacePair(2, 1, 1, 3)]
+    pairs_sp = [InterfacePair(1, 3, 2, 1)]
+    pairs = formulation isa SinglePassFormulation ? pairs_sp : pairs_tm
+    Pc = build_interface_cps(pairs, p_mat, n_mat_ref, KV_ref, P_ref, npd, nnp, formulation)
+    C, Z = build_mortar_coupling(Pc, pairs, p_mat, n_mat_ref, KV_ref, P_ref, B_ref,
+                                  ID, nnp, ned, nsd, npd, neq, NQUAD_mortar, epss_use,
+                                  strategy, formulation)
+    return K_bc, C, Z
+end
+
+"""
     run_kappa_study(; exp_range, epss) — print table of κ(A) for all four configs.
 """
 function run_kappa_study(; exp_range::UnitRange = 0:3, epss::Float64 = 1e9)
@@ -1363,7 +1565,7 @@ function run_formulation_comparison_p1(;
         for exp in exps
             n_ang_p2 = 3 * 2^exp
             n_rad    = 2 * 2^exp
-            l2_rel, _, en_rel, _ = solve_cylinder_p1(exp;
+            l2_rel, _, _, _, en_rel, _ = solve_cylinder_p1(exp;
                 strategy=strat, formulation=form,
                 epss=eps_val, NQUAD_mortar=NQUAD_mortar, kwargs...)
             rate_l2 = isnan(prev_l2) ? NaN : log2(prev_l2 / l2_rel)
@@ -1599,6 +1801,192 @@ function run_cost_study(;
             end
             println()
         end
+    end
+end
+
+# ─────────────────────── C–Z cancellation test ──────────────────────────────
+
+"""
+    run_cz_cancellation(p_ord, exp_level; nquad_range, epss)
+
+Solution-level test of the integration-error cancellation mechanism (§4.5).
+
+**Idea**: Quadrature error in M enters both C and Z of the Twin Mortar
+system.  When multipliers are eliminated, the error partially cancels in
+C Z⁻¹ Cᵀ because the perturbation appears in both "numerator" and
+"denominator".  For single-pass mortar (Z=0), no such cancellation exists.
+
+**Method**:
+1. Build reference solutions with segment-based integration (no quadrature
+   error) for both TM and SP formulations.
+2. For each NQUAD in `nquad_range`, solve with element-based integration.
+3. Report:
+   - `δC`     : relative Frobenius-norm error in coupling matrix C
+   - `δU_TM`  : relative L2 displacement error vs segment-based TM reference
+   - `δU_SP`  : relative L2 displacement error vs segment-based SP reference
+   - `gain`   : δU_SP / δU_TM  (>1 means TM cancellation helps)
+
+The displacement errors isolate the quadrature contribution by comparing
+element-based to segment-based solutions (same discretization, same ε).
+"""
+function run_cz_cancellation(
+    p_ord::Int     = 2,
+    exp_level::Int = 3;
+    nquad_range    = 1:p_ord+5,
+    epss::Float64  = 1e6,
+)
+    d = _cyl_setup(p_ord, exp_level; epss=epss)
+
+    # ── Helper: build C, Z and solve for a given (formulation, strategy, NQUAD) ──
+    function _build_solve(form, strat, nq)
+        pairs = form isa SinglePassFormulation ? d.pairs_sp : d.pairs_tm
+        Pc = build_interface_cps(pairs, d.p_mat, d.n_mat_ref, d.KV_ref,
+                                  d.P_ref, d.npd, d.nnp, form)
+        C, Z = build_mortar_coupling(
+            Pc, pairs, d.p_mat, d.n_mat_ref, d.KV_ref, d.P_ref, d.B_ref,
+            d.ID, d.nnp, d.ned, d.nsd, d.npd, d.neq, nq, d.epss,
+            strat, form)
+        U, _ = solve_mortar(d.K_bc, C, Z, d.F_bc)
+        return U, C
+    end
+
+    # ── Reference solutions: segment-based (exact integration) ───────────
+    U_tm_ref, C_tm_ref = _build_solve(TwinMortarFormulation(),  SegmentBasedIntegration(), p_ord+2)
+    U_sp_ref, C_sp_ref = _build_solve(SinglePassFormulation(),  SegmentBasedIntegration(), p_ord+2)
+    nC_tm_ref = norm(C_tm_ref)
+    nC_sp_ref = norm(C_sp_ref)
+
+    # ── Sweep NQUAD with element-based integration ───────────────────────
+    dC_tm_vec  = Float64[]
+    dC_sp_vec  = Float64[]
+    dU_tm_vec  = Float64[]
+    dU_sp_vec  = Float64[]
+    gain_vec   = Float64[]
+
+    println("\n=== C–Z cancellation test: p=$p_ord, exp=$exp_level, ε=$epss ===")
+    @printf("%-6s  %10s  %10s  %10s  %10s  %10s\n",
+            "NQUAD", "δC_TM", "δC_SP", "δU_TM", "δU_SP", "gain")
+    @printf("%s\n", "-"^68)
+
+    for nq in nquad_range
+        U_tm, C_tm = _build_solve(TwinMortarFormulation(),  ElementBasedIntegration(), nq)
+        U_sp, C_sp = _build_solve(SinglePassFormulation(),  ElementBasedIntegration(), nq)
+
+        dC_tm = norm(C_tm - C_tm_ref) / nC_tm_ref
+        dC_sp = norm(C_sp - C_sp_ref) / nC_sp_ref
+        dU_tm = norm(U_tm - U_tm_ref) / norm(U_tm_ref)
+        dU_sp = norm(U_sp - U_sp_ref) / norm(U_sp_ref)
+        gain  = dU_sp > 0 ? dU_sp / dU_tm : NaN
+
+        push!(dC_tm_vec, dC_tm);  push!(dC_sp_vec, dC_sp)
+        push!(dU_tm_vec, dU_tm);  push!(dU_sp_vec, dU_sp)
+        push!(gain_vec, gain)
+
+        @printf("%-6d  %10.2e  %10.2e  %10.2e  %10.2e  %10.2f\n",
+                nq, dC_tm, dC_sp, dU_tm, dU_sp, gain)
+    end
+
+    return (nquad=collect(nquad_range),
+            dC_tm=dC_tm_vec, dC_sp=dC_sp_vec,
+            dU_tm=dU_tm_vec, dU_sp=dU_sp_vec,
+            gain=gain_vec)
+end
+
+# ─────────────────────── Force-moment helper ──────────────────────────────────
+
+"""
+    compute_force_moments(D, M, s_cps, m_cps, B; dim=2)
+
+Compute δ_0, δ_1, δ_2 with uniform test multiplier λ = 1.
+See cz_cancellation.jl for detailed documentation.
+"""
+function compute_force_moments(D, M, s_cps, m_cps, B; dim::Int = 2)
+    Dd = Matrix(D);  Md = Matrix(M)
+    ns = length(s_cps)
+    λ = ones(ns)
+    ones_s = ones(ns);  ones_m = ones(length(m_cps))
+    y_s  = [B[cp, dim] for cp in s_cps];  y_m  = [B[cp, dim] for cp in m_cps]
+    y2_s = y_s .^ 2;                       y2_m = y_m .^ 2
+    δ_0 = dot(λ, Dd * ones_s - Md * ones_m)
+    δ_1 = dot(λ, Dd * y_s    - Md * y_m)
+    δ_2 = dot(λ, Dd * y2_s   - Md * y2_m)
+    return (δ_0 = δ_0, δ_1 = δ_1, δ_2 = δ_2)
+end
+
+# ─────────────────────── Force-moment analysis (curved interface) ─────────────
+
+"""
+    run_moment_table_cyl(p_ord, exp_level; nquad_range, epss)
+
+Force-moment equilibrium errors δ_0, δ_1, δ_2 on the curved cylinder
+interface.  Uses `build_mortar_mass_matrices` (element-based only) with
+varying NQUAD and a high-NQUAD reference.
+
+The coordinate dimension for the moments is the arc-length (y-coordinate
+of CPs in physical space).  Both spatial dimensions (x, y) are tested
+and the maximum absolute moment is reported.
+"""
+function run_moment_table_cyl(
+    p_ord::Int     = 2,
+    exp_level::Int = 2;
+    nquad_range    = 1:p_ord+3,
+    epss::Float64  = 1e6,
+)
+    d = _cyl_setup(p_ord, exp_level; epss=epss)
+
+    pair1 = d.pairs_tm[1]   # pass 1: slave=inner, master=outer
+    pair2 = d.pairs_tm[2]   # pass 2: slave=outer, master=inner
+
+    strat = ElementBasedIntegration()
+    nquad_ref = 20
+
+    println("\n=== Force-moment analysis: cylinder p=$p_ord, exp=$exp_level ===")
+    println("Moments with uniform test multiplier λ = 1")
+    println("Reporting max |δ_k| over spatial dimensions x, y\n")
+
+    for nq in nquad_range
+        println("─── NQUAD = $nq ───")
+        @printf("%-8s  %12s  %12s  %14s  %14s  %14s\n",
+                "Method", "δ₀", "δ₁", "δ₂ (pass 1)", "δ₂ (pass 2)", "δ₂ (sum)")
+        @printf("%s\n", "─"^80)
+
+        for (label, nq_use, two_pass) in [
+            ("SP-ref",  nquad_ref, false),
+            ("SPME",    nq,        false),
+            ("DP-ref",  nquad_ref, true),
+            ("TM",      nq,        true),
+        ]
+            D1, M12, s1, m1 = build_mortar_mass_matrices(
+                pair1, d.p_mat, d.n_mat_ref, d.KV_ref, d.P_ref, d.B_ref,
+                d.nnp, d.nsd, d.npd, nq_use, strat)
+
+            # Compute moments for both spatial dimensions, take max
+            mom1_x = compute_force_moments(D1, M12, s1, m1, d.B_ref; dim=1)
+            mom1_y = compute_force_moments(D1, M12, s1, m1, d.B_ref; dim=2)
+            δ0 = max(abs(mom1_x.δ_0), abs(mom1_y.δ_0))
+            δ1 = max(abs(mom1_x.δ_1), abs(mom1_y.δ_1))
+            δ2_1 = max(abs(mom1_x.δ_2), abs(mom1_y.δ_2))
+
+            if two_pass
+                D2, M21, s2, m2 = build_mortar_mass_matrices(
+                    pair2, d.p_mat, d.n_mat_ref, d.KV_ref, d.P_ref, d.B_ref,
+                    d.nnp, d.nsd, d.npd, nq_use, strat)
+                mom2_x = compute_force_moments(D2, M21, s2, m2, d.B_ref; dim=1)
+                mom2_y = compute_force_moments(D2, M21, s2, m2, d.B_ref; dim=2)
+                δ2_2 = max(abs(mom2_x.δ_2), abs(mom2_y.δ_2))
+                # Sum: use signed values for the dominant dimension
+                sum_x = mom1_x.δ_2 + mom2_x.δ_2
+                sum_y = mom1_y.δ_2 + mom2_y.δ_2
+                δ2_sum = max(abs(sum_x), abs(sum_y))
+
+                @printf("%-8s  %12.2e  %12.2e  %14.4e  %14.4e  %14.4e\n",
+                        label, δ0, δ1, δ2_1, δ2_2, δ2_sum)
+            else
+                @printf("%-8s  %12.2e  %12.2e  %14.4e  %14s  %14s\n",
+                        label, δ0, δ1, δ2_1, "—", "—")
+            end
+        end
+        println()
     end
 end
 

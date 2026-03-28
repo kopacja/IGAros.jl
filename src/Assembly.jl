@@ -32,7 +32,8 @@ function element_stiffness(
     nsd::Int, npd::Int, nen::Int,
     NQUAD::Int,
     mat::LinearElastic,
-    thickness::Float64
+    thickness::Float64;
+    Bu::Union{AbstractMatrix{Float64}, Nothing} = nothing
 )::Tuple{Matrix{Float64}, Vector{Float64}}
 
     ned  = nsd
@@ -56,9 +57,13 @@ function element_stiffness(
     # Elastic constants matrix
     D = elastic_constants(mat, nsd)
 
-    # Current configuration (B + Ub) — only update spatial columns, not weight
-    Bu = copy(B)
-    Bu[:, 1:nsd] .+= Ub
+    # Current configuration (B + Ub)
+    if Bu === nothing
+        Bu_use = copy(B)
+        Bu_use[:, 1:nsd] .+= Ub
+    else
+        Bu_use = Bu
+    end
 
     # Element nodal displacements
     Ue  = Ub[P[ien[el, :]], 1:nsd]      # nen × nsd
@@ -68,7 +73,7 @@ function element_stiffness(
 
     for (gp, gw) in GPW
         R, dR_dx, _, detJ, _ = shape_function(
-            p, n, KV, Bu, P, gp, nen, nsd, npd, el, n0, ien, inc
+            p, n, KV, Bu_use, P, gp, nen, nsd, npd, el, n0, ien, inc
         )
 
         @assert detJ > 0 "Negative Jacobian determinant in element $el"
@@ -88,6 +93,24 @@ function element_stiffness(
     end
 
     return Ke, Fe
+end
+
+"""
+    _partition(n, k) -> Vector{Tuple{Int,Int}}
+
+Split `1:n` into `k` contiguous chunks.  Returns a vector of `(start, stop)`
+tuples; when `n < k` the trailing chunks are empty (`start > stop`).
+"""
+function _partition(n::Int, k::Int)
+    base, rem = divrem(n, k)
+    chunks = Vector{Tuple{Int,Int}}(undef, k)
+    lo = 1
+    for i in 1:k
+        hi = lo + base - 1 + (i <= rem ? 1 : 0)
+        chunks[i] = (lo, hi)
+        lo = hi + 1
+    end
+    return chunks
 end
 
 """
@@ -116,41 +139,60 @@ function build_stiffness_matrix(
     thickness::Float64
 )::Tuple{SparseMatrixCSC{Float64,Int}, Vector{Float64}}
 
-    # Triplet storage for sparse assembly
-    I_idx = Int[]
-    J_idx = Int[]
-    K_val = Float64[]
-    F_vec = zeros(neq)
+    # Pre-compute deformed configuration once (shared read-only across threads)
+    Bu = copy(B)
+    Bu[:, 1:nsd] .+= Ub
 
-    for pc in 1:npc
-        ien = IEN[pc]
-        inc = INC[pc]
-        lm  = LM[pc]
-        Pp  = P[pc]
-        mat = materials[pc]
+    # Flatten (patch, element) pairs into a work list
+    work = Tuple{Int,Int}[]              # (patch_index, element_index)
+    for pc in 1:npc, el in 1:nel[pc]
+        push!(work, (pc, el))
+    end
+    ntasks = length(work)
+    nt = max(Threads.nthreads(), 1)
 
-        for el in 1:nel[pc]
+    # Per-chunk accumulators (one per chunk to avoid data races)
+    local_I = [Int[]     for _ in 1:nt]
+    local_J = [Int[]     for _ in 1:nt]
+    local_V = [Float64[] for _ in 1:nt]
+    local_F = [zeros(neq) for _ in 1:nt]
+
+    # Partition work into nt balanced chunks
+    chunks = _partition(ntasks, nt)
+
+    Threads.@threads for chunk_id in 1:nt
+        a_start, a_end = chunks[chunk_id]
+        for idx in a_start:a_end
+            pc, el = work[idx]
+
             Ke, Fe = element_stiffness(
-                p[pc, :], n[pc, :], KV[pc], Pp, B, Ub,
-                ien, inc, el, nsd, npd, nen[pc], NQUAD, mat, thickness
+                p[pc, :], n[pc, :], KV[pc], P[pc], B, Ub,
+                IEN[pc], INC[pc], el, nsd, npd, nen[pc], NQUAD,
+                materials[pc], thickness; Bu=Bu
             )
 
-            # Assemble into global system
-            dofs = lm[:, el]   # length ned*nen[pc]
+            # Scatter into chunk-local triplets
+            dofs = LM[pc][:, el]
             for a in 1:ned*nen[pc]
                 row = dofs[a]
-                row == 0 && continue  # constrained DOF
-                F_vec[row] += Fe[a]
+                row == 0 && continue
+                local_F[chunk_id][row] += Fe[a]
                 for b in 1:ned*nen[pc]
                     col = dofs[b]
                     col == 0 && continue
-                    push!(I_idx, row)
-                    push!(J_idx, col)
-                    push!(K_val, Ke[a, b])
+                    push!(local_I[chunk_id], row)
+                    push!(local_J[chunk_id], col)
+                    push!(local_V[chunk_id], Ke[a, b])
                 end
             end
         end
     end
+
+    # Merge chunk-local results
+    I_idx = reduce(vcat, local_I)
+    J_idx = reduce(vcat, local_J)
+    K_val = reduce(vcat, local_V)
+    F_vec = reduce(+, local_F)
 
     K = sparse(I_idx, J_idx, K_val, neq, neq)
     return K, F_vec

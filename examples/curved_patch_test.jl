@@ -944,3 +944,100 @@ function solve_cpt_vtk(p_ord::Int, exp_level::Int;
                   p_mat, n_mat_ref, KV_ref, P_ref, B_ref,
                   nen, IEN, INC, E, nu; n_vis=n_vis)
 end
+
+# ─── All 4 methods patch test (§7.4) ─────────────────────────────────────────
+
+"""
+    run_patch_test_cpt_4methods(; degrees, exp_level, kwargs...)
+
+Run 3D curved patch test for all 4 methods: SPMS, SPME, DPM, TM.
+Reports RMS |σ_zz + 1| for each (method, p) combination.
+"""
+function run_patch_test_cpt_4methods(;
+    degrees    = [1, 2],
+    exp_level  = 1,
+    conforming = false,
+    epss       = 1e6,
+    tol        = 1e-3,
+    kwargs...
+)
+    formulations = [
+        ("SPMS",  SinglePassFormulation(),  SegmentBasedIntegration()),
+        ("SPME",  SinglePassFormulation(),  ElementBasedIntegration()),
+        ("DPM",   DualPassFormulation(),    SegmentBasedIntegration()),
+        ("TM",    TwinMortarFormulation(),  ElementBasedIntegration()),
+    ]
+
+    conf_s = conforming ? "conforming" : "non-conforming"
+    @printf "\n=== Curved Patch Test (3D): %s, exp=%d, ε=%.0e ===\n" conf_s exp_level epss
+    @printf "  PASS if RMS|σ_zz+1| < %.0e\n\n" tol
+
+    @printf "  %-3s |" "p"
+    for (lb, _, _) in formulations; @printf "  %-14s |" lb; end; println()
+    @printf "  %s-|" "---"
+    for _ in formulations; @printf "  %s-|" "--------------"; end; println()
+
+    for p in degrees
+        @printf "  %-3d |" p
+        for (label, form, strat) in formulations
+            try
+                U, ID, npc, nsd, npd, p_mat, n_mat_ref, KV_ref, P_ref, B_ref,
+                    nen, nel, IEN, INC, E, nu, NQUAD, _ =
+                    _cpt_solve(p, exp_level; conforming=conforming, epss=epss,
+                               formulation=form, strategy=strat, kwargs...)
+                rms_zz, _, _, _ =
+                    stress_error_cpt(U, ID, npc, nsd, npd, p_mat, n_mat_ref, KV_ref, P_ref,
+                                     B_ref, nen, nel, IEN, INC, E, nu, NQUAD)
+                pass = rms_zz < tol
+                @printf "  rms=%.2e %s |" rms_zz (pass ? "✓" : "✗")
+            catch e
+                @printf "  %-16s |" "ERROR"
+            end
+        end
+        println()
+    end
+end
+
+# ─── ε-sweep for curved patch test ───────────────────────────────────────────
+
+"""
+    run_cpt_eps_sweep(; degrees, exp_level, eps_range, kwargs...)
+
+Sweep ε for TM on the 3D curved patch test.  Shows error declining with ε
+(conditional patch test pass).
+"""
+function run_cpt_eps_sweep(;
+    degrees    = [1, 2, 3, 4],
+    exp_level  = 1,
+    eps_range  = 10.0 .^ (0:8),
+    conforming = false,
+    kwargs...
+)
+    conf_s = conforming ? "conforming" : "non-conforming"
+    @printf "\n=== CPT ε-sweep (TM, %s, exp=%d) ===\n\n" conf_s exp_level
+
+    @printf "%-12s" "ε"
+    for p in degrees; @printf "  %12s" "p=$p"; end
+    println()
+    @printf "%s\n" "─"^(12 + 14*length(degrees))
+
+    for eps in eps_range
+        @printf "%-12.1e" eps
+        for p in degrees
+            try
+                U, ID, npc, nsd, npd, p_mat, n_mat_ref, KV_ref, P_ref, B_ref,
+                    nen, nel, IEN, INC, E, nu, NQUAD, _ =
+                    _cpt_solve(p, exp_level; conforming=conforming, epss=eps,
+                               formulation=TwinMortarFormulation(),
+                               strategy=ElementBasedIntegration(), kwargs...)
+                rms_zz, _, _, _ =
+                    stress_error_cpt(U, ID, npc, nsd, npd, p_mat, n_mat_ref, KV_ref, P_ref,
+                                     B_ref, nen, nel, IEN, INC, E, nu, NQUAD)
+                @printf "  %12.3e" rms_zz
+            catch e
+                @printf "  %12s" "ERROR"
+            end
+        end
+        println()
+    end
+end
