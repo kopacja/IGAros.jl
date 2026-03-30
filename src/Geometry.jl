@@ -147,14 +147,46 @@ function shape_function(
 end
 
 """
-    shape_function!(ws::AssemblyWorkspace, pc::PatchConstants,
-                    p, n, KV, B, P, xi_tilde, nen, nsd, npd, el, n0, IEN, INC)
-        -> detJ::Float64
+    shape_function!(ws, pc, p, n, KV, B, P, xi_tilde, nen, nsd, npd, el, n0, IEN, INC)
+    shape_function!(ws, pc, p, n, KV, B, P, igp,      nen, nsd, npd, el, n0, IEN, INC)
 
 In-place variant of `shape_function`.  All output is written into `ws`:
   `ws.R`, `ws.dR_dx`, `ws.dx_dXi`, `ws.n_vec`.
 Returns the Jacobian determinant `detJ`.  No heap allocation occurs.
+
+The `igp::Int` overload reads Gauss-point coordinates directly from
+`pc.gp_coords[igp, :]`, avoiding a `@view` allocation.
 """
+function shape_function!(
+    ws::AssemblyWorkspace,
+    pc::PatchConstants,
+    p::AbstractVector{Int},
+    n::AbstractVector{Int},
+    KV::AbstractVector{<:AbstractVector{Float64}},
+    B::AbstractMatrix{Float64},
+    P::AbstractVector{Int},
+    igp::Int,
+    nen::Int, nsd::Int, npd::Int,
+    el::Int, n0::AbstractVector{Int},
+    IEN::AbstractMatrix{Int},
+    INC::AbstractVector{<:AbstractVector{Int}}
+)::Float64
+
+    # ── 1. Parent-to-parametric mapping ──────────────────────────────────────
+    @inbounds for i in 1:npd
+        kv = KV[i]
+        a  = kv[n0[i]]
+        b  = kv[n0[i] + 1]
+        ws.Xi[i] = 0.5 * ((b - a) * pc.gp_coords[igp, i] + (b + a))
+        ws.dXi_dtildeXi[i, i] = 0.5 * (b - a)
+        for j in 1:npd
+            j != i && (ws.dXi_dtildeXi[i, j] = 0.0)
+        end
+    end
+
+    return _shape_function_core!(ws, pc, p, n, KV, B, P, nen, nsd, npd, el, n0, IEN, INC)
+end
+
 function shape_function!(
     ws::AssemblyWorkspace,
     pc::PatchConstants,
@@ -177,11 +209,28 @@ function shape_function!(
         b  = kv[n0[i] + 1]
         ws.Xi[i] = 0.5 * ((b - a) * xi_tilde[i] + (b + a))
         ws.dXi_dtildeXi[i, i] = 0.5 * (b - a)
-        # Zero off-diagonals (workspace may have stale values)
         for j in 1:npd
             j != i && (ws.dXi_dtildeXi[i, j] = 0.0)
         end
     end
+
+    return _shape_function_core!(ws, pc, p, n, KV, B, P, nen, nsd, npd, el, n0, IEN, INC)
+end
+
+"""Internal: shared core of shape_function! after parent-to-parametric mapping."""
+function _shape_function_core!(
+    ws::AssemblyWorkspace,
+    pc::PatchConstants,
+    p::AbstractVector{Int},
+    n::AbstractVector{Int},
+    KV::AbstractVector{<:AbstractVector{Float64}},
+    B::AbstractMatrix{Float64},
+    P::AbstractVector{Int},
+    nen::Int, nsd::Int, npd::Int,
+    el::Int, n0::AbstractVector{Int},
+    IEN::AbstractMatrix{Int},
+    INC::AbstractVector{<:AbstractVector{Int}}
+)::Float64
 
     # ── 1D basis functions via in-place bspline ──────────────────────────────
     @inbounds for i in 1:npd

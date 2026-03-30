@@ -139,136 +139,168 @@ function build_stiffness_matrix(
     thickness::Float64
 )::Tuple{SparseMatrixCSC{Float64,Int}, Vector{Float64}}
 
+    # Prevent BLAS from spawning its own threads (conflicts with Julia threads)
+    old_blas_threads = LinearAlgebra.BLAS.get_num_threads()
+    LinearAlgebra.BLAS.set_num_threads(1)
+
     # Pre-compute deformed configuration once (shared read-only across threads)
     Bu = copy(B)
     Bu[:, 1:nsd] .+= Ub
 
     nstrain = nsd == 2 ? 3 : 6
     nt = max(Threads.nthreads(), 1)
-    K = spzeros(neq, neq)
     F_vec = zeros(neq)
 
     # Global maxima for workspace sizing
     p_max   = maximum(p)
     nen_max = maximum(nen)
+    ndof_max = ned * nen_max
 
     # Pre-compute PatchConstants (read-only, shared across threads)
     patch_consts = [PatchConstants(p[pc, :], nen[pc], nsd, npd, NQUAD, materials[pc])
                     for pc in 1:npc]
     ngp = NQUAD^npd
 
-    # Assemble per-patch to limit peak memory
+    # Pre-extract per-patch degree/count vectors (avoid p[pc,:] slice allocations)
+    p_vecs = [p[pc, :] for pc in 1:npc]
+    n_vecs = [n[pc, :] for pc in 1:npc]
+
+    # Total element count for triplet sizing
+    total_els = sum(nel)
+    max_triplets_per_ws = cld(total_els, nt) * ndof_max * ndof_max
+
+    # Create workspaces ONCE, reuse across all patches
+    workspaces = [AssemblyWorkspace(p_max, nen_max, nsd, npd, neq, max_triplets_per_ws)
+                  for _ in 1:nt]
+
+    # Flatten (patch, element) pairs into a work list
+    work = Vector{Tuple{Int,Int}}(undef, total_els)
+    wi = 0
     for pc in 1:npc
-        n_el = nel[pc]
-        n_el == 0 && continue
-        ndof_el = ned * nen[pc]
-        nen_pc  = nen[pc]
-        pc_const = patch_consts[pc]
+        for el in 1:nel[pc]
+            wi += 1
+            work[wi] = (pc, el)
+        end
+    end
 
-        # Partition elements across threads
-        chunks = _partition(n_el, nt)
+    # Partition ALL elements across threads (not per-patch)
+    chunks = _partition(total_els, nt)
 
-        # Compute max chunk size for triplet pre-allocation
-        max_chunk_els = maximum(c[2] - c[1] + 1 for c in chunks)
-        max_triplets  = max_chunk_els * ndof_el * ndof_el
+    Threads.@threads :static for chunk_id in 1:nt
+        ws = workspaces[chunk_id]
+        ws.triplet_pos[] = 0
+        fill!(ws.F_buf, 0.0)
 
-        # Create one workspace per thread
-        workspaces = [AssemblyWorkspace(p_max, nen_max, nsd, npd, neq, max_triplets)
-                      for _ in 1:nt]
+        a_start, a_end = chunks[chunk_id]
+        a_start > a_end && continue
 
-        Threads.@threads for chunk_id in 1:nt
-            ws = workspaces[chunk_id]
-            ws.triplet_pos[] = 0
-            a_start, a_end = chunks[chunk_id]
+        for idx in a_start:a_end
+            pc, el = work[idx]
+            ndof_el = ned * nen[pc]
+            nen_pc  = nen[pc]
+            pc_const = patch_consts[pc]
+            p_pc = p_vecs[pc]
+            n_pc = n_vecs[pc]
 
-            p_pc = p[pc, :]
-            n_pc = n[pc, :]
+            # --- Knot span indices (from INC, no allocation) ---
+            anchor = IEN[pc][el, 1]
+            n0 = INC[pc][anchor]
 
-            for el in a_start:a_end
-                # --- Knot span indices (from INC, no allocation) ---
-                anchor = IEN[pc][el, 1]
-                n0 = INC[pc][anchor]
-
-                # --- Zero-measure element check ---
-                skip = false
-                @inbounds for i in 1:npd
-                    kv = KV[pc][i]
-                    if kv[n0[i]] ≈ kv[n0[i] + 1]
-                        skip = true
-                        break
-                    end
+            # --- Zero-measure element check ---
+            skip = false
+            @inbounds for i in 1:npd
+                kv = KV[pc][i]
+                if kv[n0[i]] ≈ kv[n0[i] + 1]
+                    skip = true
+                    break
                 end
-                if skip
-                    # Scatter zeros (Ke/Fe already zero-effect)
-                    continue
-                end
+            end
+            skip && continue
 
-                # --- Zero Ke, Fe ---
-                @inbounds for j in 1:ndof_el, i in 1:ndof_el
+            # --- Zero Ke, Fe ---
+            @inbounds for j in 1:ndof_el
+                @simd for i in 1:ndof_el
                     ws.Ke[i, j] = 0.0
                 end
-                @inbounds for i in 1:ndof_el
-                    ws.Fe[i] = 0.0
-                end
+            end
+            @inbounds @simd for i in 1:ndof_el
+                ws.Fe[i] = 0.0
+            end
 
-                # --- Extract Ue_vec (displacement at element nodes) ---
-                @inbounds for a in 1:nen_pc
-                    cp = P[pc][IEN[pc][el, a]]
-                    for d in 1:nsd
-                        ws.Ue_vec[(a-1)*ned + d] = Ub[cp, d]
+            # --- Extract Ue_vec (displacement at element nodes) ---
+            @inbounds for a in 1:nen_pc
+                cp = P[pc][IEN[pc][el, a]]
+                for d in 1:nsd
+                    ws.Ue_vec[(a-1)*ned + d] = Ub[cp, d]
+                end
+            end
+
+            # --- Gauss quadrature loop ---
+            @inbounds for igp in 1:ngp
+                detJ = shape_function!(
+                    ws, pc_const, p_pc, n_pc, KV[pc], Bu, P[pc],
+                    igp, nen_pc, nsd, npd, el, n0, IEN[pc], INC[pc]
+                )
+
+                detJ <= 0.0 && continue
+
+                gwJ = pc_const.gp_weights[igp] * detJ * thickness
+
+                # --- Build B0 in-place ---
+                for j in 1:nen_pc
+                    @simd for i in 1:nsd
+                        ws.dN_dX_T[i, j] = ws.dR_dx[j, i]
                     end
                 end
+                strain_displacement_matrix!(ws.B0, nsd, nen_pc, ws.dN_dX_T)
 
-                # --- Gauss quadrature loop ---
-                @inbounds for igp in 1:ngp
-                    # shape_function! reads xi_tilde from pc_const.gp_coords
-                    xi_tilde = @view pc_const.gp_coords[igp, :]
-
-                    detJ = shape_function!(
-                        ws, pc_const, p_pc, n_pc, KV[pc], Bu, P[pc],
-                        xi_tilde, nen_pc, nsd, npd, el, n0, IEN[pc], INC[pc]
-                    )
-
-                    detJ <= 0.0 && continue
-
-                    gwJ = pc_const.gp_weights[igp] * detJ * thickness
-
-                    # --- Build B0 in-place ---
-                    # dN_dX_T = transpose of dR_dx (nsd × nen)
-                    for j in 1:nen_pc
-                        for i in 1:nsd
-                            ws.dN_dX_T[i, j] = ws.dR_dx[j, i]
-                        end
+                # --- Ke += B0' * D * B0 * gwJ ---
+                if ndof_el >= 24  # 3D or high-order: BLAS mul!
+                    B0v   = @view ws.B0[1:nstrain, 1:ndof_el]
+                    BtDv  = @view ws.BtD[1:ndof_el, 1:nstrain]
+                    BtDBv = @view ws.BtDB[1:ndof_el, 1:ndof_el]
+                    Kev   = @view ws.Ke[1:ndof_el, 1:ndof_el]
+                    mul!(BtDv, transpose(B0v), pc_const.D)
+                    mul!(BtDBv, BtDv, B0v)
+                    @simd for i in eachindex(Kev)
+                        Kev[i] += BtDBv[i] * gwJ
                     end
-                    strain_displacement_matrix!(ws.B0, nsd, nen_pc, ws.dN_dX_T)
-
-                    # --- Ke += B0' * D * B0 * gwJ ---
-                    # BtD = B0' * D  (ndof × nstrain)
+                    # Fe via BLAS
+                    eps_v = @view ws.eps_vec[1:nstrain]
+                    sig_v = @view ws.sigma_vec[1:nstrain]
+                    Ue_v  = @view ws.Ue_vec[1:ndof_el]
+                    Bt_s  = @view ws.Bt_sigma[1:ndof_el]
+                    mul!(eps_v, B0v, Ue_v)
+                    mul!(sig_v, pc_const.D, eps_v)
+                    mul!(Bt_s, transpose(B0v), sig_v)
+                    @simd for i in 1:ndof_el
+                        ws.Fe[i] += Bt_s[i] * gwJ
+                    end
+                else  # 2D small elements: scalar loops (faster than BLAS dispatch)
+                    # BtD = B0' * D
                     for j in 1:nstrain
                         for i in 1:ndof_el
                             s = 0.0
-                            for k in 1:nstrain
+                            @simd for k in 1:nstrain
                                 s += ws.B0[k, i] * pc_const.D[k, j]
                             end
                             ws.BtD[i, j] = s
                         end
                     end
-                    # BtDB = BtD * B0  (ndof × ndof)
+                    # Ke += BtD * B0 * gwJ
                     for j in 1:ndof_el
                         for i in 1:ndof_el
                             s = 0.0
-                            for k in 1:nstrain
+                            @simd for k in 1:nstrain
                                 s += ws.BtD[i, k] * ws.B0[k, j]
                             end
                             ws.Ke[i, j] += s * gwJ
                         end
                     end
-
-                    # --- Fe += B0' * sigma * gwJ ---
-                    # eps = B0 * Ue_vec
+                    # Fe: eps = B0 * Ue_vec
                     for i in 1:nstrain
                         s = 0.0
-                        for k in 1:ndof_el
+                        @simd for k in 1:ndof_el
                             s += ws.B0[i, k] * ws.Ue_vec[k]
                         end
                         ws.eps_vec[i] = s
@@ -276,66 +308,64 @@ function build_stiffness_matrix(
                     # sigma = D * eps
                     for i in 1:nstrain
                         s = 0.0
-                        for k in 1:nstrain
+                        @simd for k in 1:nstrain
                             s += pc_const.D[i, k] * ws.eps_vec[k]
                         end
                         ws.sigma_vec[i] = s
                     end
-                    # Bt_sigma = B0' * sigma
+                    # Fe += B0' * sigma * gwJ
                     for i in 1:ndof_el
                         s = 0.0
-                        for k in 1:nstrain
+                        @simd for k in 1:nstrain
                             s += ws.B0[k, i] * ws.sigma_vec[k]
                         end
                         ws.Fe[i] += s * gwJ
                     end
-                end  # igp
-
-                # --- Scatter into pre-sized triplets ---
-                pos = ws.triplet_pos[]
-                for a in 1:ndof_el
-                    row = LM[pc][a, el]
-                    row == 0 && continue
-                    ws.F_buf[row] += ws.Fe[a]
-                    for b in 1:ndof_el
-                        col = LM[pc][b, el]
-                        col == 0 && continue
-                        ke_val = ws.Ke[a, b]
-                        ke_val == 0.0 && continue
-                        pos += 1
-                        ws.I_buf[pos] = row
-                        ws.J_buf[pos] = col
-                        ws.V_buf[pos] = ke_val
-                    end
                 end
-                ws.triplet_pos[] = pos
-            end  # el
-        end  # @threads
+            end  # igp
 
-        # --- Merge chunk-local results ---
-        total_nnz = sum(ws.triplet_pos[] for ws in workspaces)
-        I_pc = Vector{Int}(undef, total_nnz)
-        J_pc = Vector{Int}(undef, total_nnz)
-        V_pc = Vector{Float64}(undef, total_nnz)
-        off = 0
-        for c in 1:nt
-            n_c = workspaces[c].triplet_pos[]
-            n_c == 0 && continue
-            copyto!(I_pc, off + 1, workspaces[c].I_buf, 1, n_c)
-            copyto!(J_pc, off + 1, workspaces[c].J_buf, 1, n_c)
-            copyto!(V_pc, off + 1, workspaces[c].V_buf, 1, n_c)
-            off += n_c
-        end
-        for c in 1:nt
-            F_vec .+= workspaces[c].F_buf
-        end
+            # --- Scatter into pre-sized triplets ---
+            pos = ws.triplet_pos[]
+            @inbounds for a in 1:ndof_el
+                row = LM[pc][a, el]
+                row == 0 && continue
+                ws.F_buf[row] += ws.Fe[a]
+                for b in 1:ndof_el
+                    col = LM[pc][b, el]
+                    col == 0 && continue
+                    ke_val = ws.Ke[a, b]
+                    ke_val == 0.0 && continue
+                    pos += 1
+                    ws.I_buf[pos] = row
+                    ws.J_buf[pos] = col
+                    ws.V_buf[pos] = ke_val
+                end
+            end
+            ws.triplet_pos[] = pos
+        end  # idx
+    end  # @threads
 
-        # Add patch contribution
-        if total_nnz > 0
-            K += sparse(I_pc, J_pc, V_pc, neq, neq)
-        end
-    end  # pc
+    # --- Single sparse() call from all threads ---
+    total_nnz = sum(ws.triplet_pos[] for ws in workspaces)
+    I_all = Vector{Int}(undef, total_nnz)
+    J_all = Vector{Int}(undef, total_nnz)
+    V_all = Vector{Float64}(undef, total_nnz)
+    off = 0
+    for c in 1:nt
+        n_c = workspaces[c].triplet_pos[]
+        n_c == 0 && continue
+        copyto!(I_all, off + 1, workspaces[c].I_buf, 1, n_c)
+        copyto!(J_all, off + 1, workspaces[c].J_buf, 1, n_c)
+        copyto!(V_all, off + 1, workspaces[c].V_buf, 1, n_c)
+        off += n_c
+    end
+    for c in 1:nt
+        F_vec .+= workspaces[c].F_buf
+    end
 
+    K = sparse(I_all, J_all, V_all, neq, neq)
+
+    LinearAlgebra.BLAS.set_num_threads(old_blas_threads)
     return K, F_vec
 end
 
