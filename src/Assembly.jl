@@ -143,58 +143,77 @@ function build_stiffness_matrix(
     Bu = copy(B)
     Bu[:, 1:nsd] .+= Ub
 
-    # Flatten (patch, element) pairs into a work list
-    work = Tuple{Int,Int}[]              # (patch_index, element_index)
-    for pc in 1:npc, el in 1:nel[pc]
-        push!(work, (pc, el))
-    end
-    ntasks = length(work)
     nt = max(Threads.nthreads(), 1)
+    K = spzeros(neq, neq)
+    F_vec = zeros(neq)
 
-    # Per-chunk accumulators (one per chunk to avoid data races)
-    local_I = [Int[]     for _ in 1:nt]
-    local_J = [Int[]     for _ in 1:nt]
-    local_V = [Float64[] for _ in 1:nt]
-    local_F = [zeros(neq) for _ in 1:nt]
+    # Assemble per-patch to limit peak memory (one patch's triplets at a time)
+    for pc in 1:npc
+        n_el = nel[pc]
+        n_el == 0 && continue
+        ndof_el = ned * nen[pc]
 
-    # Partition work into nt balanced chunks
-    chunks = _partition(ntasks, nt)
+        # Partition elements across threads
+        chunks = _partition(n_el, nt)
+        local_I = [Int[]     for _ in 1:nt]
+        local_J = [Int[]     for _ in 1:nt]
+        local_V = [Float64[] for _ in 1:nt]
+        local_F = [zeros(neq) for _ in 1:nt]
 
-    Threads.@threads for chunk_id in 1:nt
-        a_start, a_end = chunks[chunk_id]
-        for idx in a_start:a_end
-            pc, el = work[idx]
+        # Pre-allocate per-chunk based on estimated nnz
+        for c in 1:nt
+            a_s, a_e = chunks[c]
+            est = (a_e - a_s + 1) * ndof_el * ndof_el
+            sizehint!(local_I[c], est)
+            sizehint!(local_J[c], est)
+            sizehint!(local_V[c], est)
+        end
 
-            Ke, Fe = element_stiffness(
-                p[pc, :], n[pc, :], KV[pc], P[pc], B, Ub,
-                IEN[pc], INC[pc], el, nsd, npd, nen[pc], NQUAD,
-                materials[pc], thickness; Bu=Bu
-            )
+        Threads.@threads for chunk_id in 1:nt
+            a_start, a_end = chunks[chunk_id]
+            for el in a_start:a_end
+                Ke, Fe = element_stiffness(
+                    p[pc, :], n[pc, :], KV[pc], P[pc], B, Ub,
+                    IEN[pc], INC[pc], el, nsd, npd, nen[pc], NQUAD,
+                    materials[pc], thickness; Bu=Bu
+                )
 
-            # Scatter into chunk-local triplets
-            dofs = LM[pc][:, el]
-            for a in 1:ned*nen[pc]
-                row = dofs[a]
-                row == 0 && continue
-                local_F[chunk_id][row] += Fe[a]
-                for b in 1:ned*nen[pc]
-                    col = dofs[b]
-                    col == 0 && continue
-                    push!(local_I[chunk_id], row)
-                    push!(local_J[chunk_id], col)
-                    push!(local_V[chunk_id], Ke[a, b])
+                dofs = LM[pc][:, el]
+                for a in 1:ndof_el
+                    row = dofs[a]
+                    row == 0 && continue
+                    local_F[chunk_id][row] += Fe[a]
+                    for b in 1:ndof_el
+                        col = dofs[b]
+                        (col == 0 || Ke[a, b] == 0.0) && continue
+                        push!(local_I[chunk_id], row)
+                        push!(local_J[chunk_id], col)
+                        push!(local_V[chunk_id], Ke[a, b])
+                    end
                 end
             end
         end
+
+        # Merge chunk-local triplets into per-patch arrays
+        total_nnz = sum(length, local_I)
+        I_pc = Vector{Int}(undef, total_nnz)
+        J_pc = Vector{Int}(undef, total_nnz)
+        V_pc = Vector{Float64}(undef, total_nnz)
+        off = 0
+        for c in 1:nt
+            n_c = length(local_I[c])
+            copyto!(I_pc, off + 1, local_I[c], 1, n_c)
+            copyto!(J_pc, off + 1, local_J[c], 1, n_c)
+            copyto!(V_pc, off + 1, local_V[c], 1, n_c)
+            local_I[c] = Int[]; local_J[c] = Int[]; local_V[c] = Float64[]
+            off += n_c
+        end
+        F_vec .+= reduce(+, local_F)
+
+        # Add patch contribution and free triplets
+        K += sparse(I_pc, J_pc, V_pc, neq, neq)
     end
 
-    # Merge chunk-local results
-    I_idx = reduce(vcat, local_I)
-    J_idx = reduce(vcat, local_J)
-    K_val = reduce(vcat, local_V)
-    F_vec = reduce(+, local_F)
-
-    K = sparse(I_idx, J_idx, K_val, neq, neq)
     return K, F_vec
 end
 
