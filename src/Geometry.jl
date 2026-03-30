@@ -147,6 +147,208 @@ function shape_function(
 end
 
 """
+    shape_function!(ws::AssemblyWorkspace, pc::PatchConstants,
+                    p, n, KV, B, P, xi_tilde, nen, nsd, npd, el, n0, IEN, INC)
+        -> detJ::Float64
+
+In-place variant of `shape_function`.  All output is written into `ws`:
+  `ws.R`, `ws.dR_dx`, `ws.dx_dXi`, `ws.n_vec`.
+Returns the Jacobian determinant `detJ`.  No heap allocation occurs.
+"""
+function shape_function!(
+    ws::AssemblyWorkspace,
+    pc::PatchConstants,
+    p::AbstractVector{Int},
+    n::AbstractVector{Int},
+    KV::AbstractVector{<:AbstractVector{Float64}},
+    B::AbstractMatrix{Float64},
+    P::AbstractVector{Int},
+    xi_tilde::AbstractVector{Float64},
+    nen::Int, nsd::Int, npd::Int,
+    el::Int, n0::AbstractVector{Int},
+    IEN::AbstractMatrix{Int},
+    INC::AbstractVector{<:AbstractVector{Int}}
+)::Float64
+
+    # ── 1. Parent-to-parametric mapping ──────────────────────────────────────
+    @inbounds for i in 1:npd
+        kv = KV[i]
+        a  = kv[n0[i]]
+        b  = kv[n0[i] + 1]
+        ws.Xi[i] = 0.5 * ((b - a) * xi_tilde[i] + (b + a))
+        ws.dXi_dtildeXi[i, i] = 0.5 * (b - a)
+        # Zero off-diagonals (workspace may have stale values)
+        for j in 1:npd
+            j != i && (ws.dXi_dtildeXi[i, j] = 0.0)
+        end
+    end
+
+    # ── 1D basis functions via in-place bspline ──────────────────────────────
+    @inbounds for i in 1:npd
+        bspline_basis_and_deriv!(
+            ws.ders, ws.ndu, ws.bsp_left, ws.bsp_right, ws.a_bsp,
+            n0[i], ws.Xi[i], p[i], 1, KV[i]
+        )
+        # Copy results into per-direction buffers
+        for j in 1:p[i]+1
+            ws.NN[i][j]      = ws.ders[1, j]
+            ws.dNN_dXi[i][j] = ws.ders[2, j]
+        end
+    end
+
+    # ── 2. Build tensor-product NURBS functions ───────────────────────────────
+    # Extract weights (no allocation — write into ws.W_buf)
+    @inbounds for a in 1:nen
+        ws.W_buf[a] = B[P[IEN[el, a]], end]
+    end
+
+    # NURBS numerator: N_a = W_a * ∏_i NN[i][idx[a,i]]
+    @inbounds for a in 1:nen
+        v = ws.W_buf[a]
+        for i in 1:npd
+            v *= ws.NN[i][pc.idx[a, i]]
+        end
+        ws.N_num[a] = v
+    end
+
+    sum_W = 0.0
+    @inbounds for a in 1:nen
+        sum_W += ws.N_num[a]
+    end
+
+    # Parametric derivatives
+    @inbounds for i in 1:npd
+        for a in 1:nen
+            v = ws.dNN_dXi[i][pc.idx[a, i]]
+            for k in 1:npd
+                k == i && continue
+                v *= ws.NN[k][pc.idx[a, k]]
+            end
+            ws.dN_dXi_num[a, i] = v * ws.W_buf[a]
+        end
+    end
+
+    # dsum_W
+    @inbounds for i in 1:npd
+        s = 0.0
+        for a in 1:nen
+            s += ws.dN_dXi_num[a, i]
+        end
+        ws.dsum_W[i] = s
+    end
+
+    # NURBS basis R and derivatives dR_dXi
+    inv_sum_W = 1.0 / sum_W
+    @inbounds for a in 1:nen
+        ws.R[a] = ws.N_num[a] * inv_sum_W
+    end
+    @inbounds for i in 1:npd
+        for a in 1:nen
+            ws.dR_dXi[a, i] = (ws.dN_dXi_num[a, i] - ws.R[a] * ws.dsum_W[i]) * inv_sum_W
+        end
+    end
+
+    # ── 3. Physical Jacobian dx/dXi ──────────────────────────────────────────
+    # Copy Xcp in-place (avoid fancy indexing allocation)
+    @inbounds for a in 1:nen
+        gidx = P[IEN[el, a]]
+        for d in 1:nsd
+            ws.Xcp[a, d] = B[gidx, d]
+        end
+    end
+
+    # dx_dXi = Xcp' * dR_dXi  →  (nsd × npd)
+    @inbounds for j in 1:npd
+        for d in 1:nsd
+            s = 0.0
+            for a in 1:nen
+                s += ws.Xcp[a, d] * ws.dR_dXi[a, j]
+            end
+            ws.dx_dXi[d, j] = s
+        end
+    end
+
+    # ── 4. Jacobian determinant and physical gradients ────────────────────────
+    detJ = 0.0
+
+    if nsd == npd
+        # J_mat = dx_dXi * dXi_dtildeXi  (nsd × nsd)
+        @inbounds for j in 1:nsd
+            for i in 1:nsd
+                s = 0.0
+                for k in 1:npd
+                    s += ws.dx_dXi[i, k] * ws.dXi_dtildeXi[k, j]
+                end
+                ws.J_mat[i, j] = s
+            end
+        end
+
+        if nsd == 2
+            detJ = ws.J_mat[1,1] * ws.J_mat[2,2] - ws.J_mat[1,2] * ws.J_mat[2,1]
+            # Inline 2×2 inverse of dx_dXi
+            det_dxdXi = ws.dx_dXi[1,1] * ws.dx_dXi[2,2] - ws.dx_dXi[1,2] * ws.dx_dXi[2,1]
+            inv_det = 1.0 / det_dxdXi
+            ws.dXi_dx[1,1] =  ws.dx_dXi[2,2] * inv_det
+            ws.dXi_dx[1,2] = -ws.dx_dXi[1,2] * inv_det
+            ws.dXi_dx[2,1] = -ws.dx_dXi[2,1] * inv_det
+            ws.dXi_dx[2,2] =  ws.dx_dXi[1,1] * inv_det
+        elseif nsd == 3
+            # Inline 3×3 determinant
+            a11 = ws.J_mat[1,1]; a12 = ws.J_mat[1,2]; a13 = ws.J_mat[1,3]
+            a21 = ws.J_mat[2,1]; a22 = ws.J_mat[2,2]; a23 = ws.J_mat[2,3]
+            a31 = ws.J_mat[3,1]; a32 = ws.J_mat[3,2]; a33 = ws.J_mat[3,3]
+            detJ = a11*(a22*a33 - a23*a32) - a12*(a21*a33 - a23*a31) + a13*(a21*a32 - a22*a31)
+            # Inline 3×3 inverse of dx_dXi
+            b11 = ws.dx_dXi[1,1]; b12 = ws.dx_dXi[1,2]; b13 = ws.dx_dXi[1,3]
+            b21 = ws.dx_dXi[2,1]; b22 = ws.dx_dXi[2,2]; b23 = ws.dx_dXi[2,3]
+            b31 = ws.dx_dXi[3,1]; b32 = ws.dx_dXi[3,2]; b33 = ws.dx_dXi[3,3]
+            det_b = b11*(b22*b33 - b23*b32) - b12*(b21*b33 - b23*b31) + b13*(b21*b32 - b22*b31)
+            inv_det_b = 1.0 / det_b
+            ws.dXi_dx[1,1] = (b22*b33 - b23*b32) * inv_det_b
+            ws.dXi_dx[1,2] = (b13*b32 - b12*b33) * inv_det_b
+            ws.dXi_dx[1,3] = (b12*b23 - b13*b22) * inv_det_b
+            ws.dXi_dx[2,1] = (b23*b31 - b21*b33) * inv_det_b
+            ws.dXi_dx[2,2] = (b11*b33 - b13*b31) * inv_det_b
+            ws.dXi_dx[2,3] = (b13*b21 - b11*b23) * inv_det_b
+            ws.dXi_dx[3,1] = (b21*b32 - b22*b31) * inv_det_b
+            ws.dXi_dx[3,2] = (b12*b31 - b11*b32) * inv_det_b
+            ws.dXi_dx[3,3] = (b11*b22 - b12*b21) * inv_det_b
+        end
+
+        # dR_dx = dR_dXi * dXi_dx  (nen × nsd)
+        @inbounds for j in 1:nsd
+            for a in 1:nen
+                s = 0.0
+                for k in 1:npd
+                    s += ws.dR_dXi[a, k] * ws.dXi_dx[k, j]
+                end
+                ws.dR_dx[a, j] = s
+            end
+        end
+
+    elseif nsd == 3 && npd == 2
+        gx = ws.dx_dXi[2,1]*ws.dx_dXi[3,2] - ws.dx_dXi[3,1]*ws.dx_dXi[2,2]
+        gy = ws.dx_dXi[3,1]*ws.dx_dXi[1,2] - ws.dx_dXi[1,1]*ws.dx_dXi[3,2]
+        gz = ws.dx_dXi[1,1]*ws.dx_dXi[2,2] - ws.dx_dXi[2,1]*ws.dx_dXi[1,2]
+        g_norm = sqrt(gx^2 + gy^2 + gz^2)
+        ws.n_vec[1] = gx / g_norm
+        ws.n_vec[2] = gy / g_norm
+        ws.n_vec[3] = gz / g_norm
+        detJ = ws.dXi_dtildeXi[1,1] * ws.dXi_dtildeXi[2,2] * g_norm
+
+    elseif nsd == 2 && npd == 1
+        gx = ws.dx_dXi[1,1]; gy = ws.dx_dXi[2,1]
+        g_norm = sqrt(gx^2 + gy^2)
+        # n = R90 * tangent (outward normal for 2D curve)
+        ws.n_vec[1] =  gy / g_norm
+        ws.n_vec[2] = -gx / g_norm
+        detJ = ws.dXi_dtildeXi[1,1] * g_norm
+    end
+
+    return detJ
+end
+
+"""
     find_element_span(p, n, KV, xi_tilde, INC) -> (n0, el)
 
 Given parametric coordinates (parent space ξ̃ ∈ [-1,1]^npd), compute the

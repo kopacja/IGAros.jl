@@ -4,6 +4,13 @@
 # Usage:  julia -t <N> --project=.. bench_assembly.jl
 # SLURM:  see bench_assembly.sh
 
+import Pkg
+let proj = joinpath(@__DIR__, "..")
+    Pkg.activate(proj)
+    Pkg.instantiate(; allow_autoprecomp=false)
+    Pkg.precompile()
+end
+
 using IGAros
 using Printf
 

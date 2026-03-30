@@ -160,3 +160,89 @@ function bspline_basis_and_deriv(
 
     return ders
 end
+
+"""
+    bspline_basis_and_deriv!(ders, ndu, left, right, a,
+                             i, u, p, n_deriv, kv) -> nothing
+
+In-place variant of `bspline_basis_and_deriv`.  All output is written into the
+pre-allocated buffers; no heap allocation occurs.
+
+Buffer sizes (minimum):
+- `ders`:  (n_deriv+1) × (p+1)
+- `ndu`:   (p+1) × (p+1)
+- `left`:  p+1
+- `right`: p+1
+- `a`:     2 × (p+1)
+"""
+function bspline_basis_and_deriv!(
+    ders::AbstractMatrix{Float64},
+    ndu::AbstractMatrix{Float64},
+    left::AbstractVector{Float64},
+    right::AbstractVector{Float64},
+    a::AbstractMatrix{Float64},
+    i::Int, u::Float64, p::Int, n_deriv::Int,
+    kv::AbstractVector{Float64}
+)::Nothing
+
+    # Zero only the regions we use
+    for c in 1:p+1, r in 1:p+1
+        ndu[r, c] = 0.0
+    end
+    for c in 1:p+1, r in 1:n_deriv+1
+        ders[r, c] = 0.0
+    end
+
+    ndu[1, 1] = 1.0
+    @inbounds for j in 1:p
+        left[j + 1]  = u - kv[i + 1 - j]
+        right[j + 1] = kv[i + j] - u
+        saved = 0.0
+        for r in 0:j-1
+            ndu[j + 1, r + 1] = right[r + 2] + left[j - r + 1]
+            temp = ndu[r + 1, j] / ndu[j + 1, r + 1]
+            ndu[r + 1, j + 1] = saved + right[r + 2] * temp
+            saved = left[j - r + 1] * temp
+        end
+        ndu[j + 1, j + 1] = saved
+    end
+
+    @inbounds for j in 0:p
+        ders[1, j + 1] = ndu[j + 1, p + 1]
+    end
+
+    @inbounds for r in 0:p
+        s1 = 1; s2 = 2
+        a[1, 1] = 1.0
+        for k in 1:n_deriv
+            d = 0.0
+            rk = r - k; pk = p - k
+            if r >= k
+                a[s2, 1] = a[s1, 1] / ndu[pk + 2, rk + 1]
+                d = a[s2, 1] * ndu[rk + 1, pk + 1]
+            end
+            j1 = (rk >= -1) ? 1 : -rk
+            j2 = (r - 1 <= pk) ? k - 1 : p - r
+            for j in j1:j2
+                a[s2, j + 1] = (a[s1, j + 1] - a[s1, j]) / ndu[pk + 2, rk + j + 1]
+                d += a[s2, j + 1] * ndu[rk + j + 1, pk + 1]
+            end
+            if r <= pk
+                a[s2, k + 1] = -a[s1, k] / ndu[pk + 2, r + 1]
+                d += a[s2, k + 1] * ndu[r + 1, pk + 1]
+            end
+            ders[k + 1, r + 1] = d
+            s1, s2 = s2, s1
+        end
+    end
+
+    r = p
+    @inbounds for k in 1:n_deriv
+        for j in 0:p
+            ders[k + 1, j + 1] *= r
+        end
+        r *= (p - k)
+    end
+
+    return nothing
+end
