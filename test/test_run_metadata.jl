@@ -30,6 +30,7 @@ using IGAros
         @test cluster["cpus_per_task"] == 0
         @test cluster["partition"] == ""
         @test cluster["wallclock_seconds"] == 42
+        @test cluster["threads"] == Threads.nthreads()
         @test !isempty(cluster["host"])
     end
 

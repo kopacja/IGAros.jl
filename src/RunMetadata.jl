@@ -50,6 +50,7 @@ function capture_cluster_env(; wallclock_seconds::Real = 0)
         "partition"         => get(ENV, "SLURM_JOB_PARTITION", ""),
         "cpus_per_task"     => _parse_int(get(ENV, "SLURM_CPUS_PER_TASK", "0")),
         "slurm_jobid"       => _parse_int(get(ENV, "SLURM_JOB_ID", "0")),
+        "threads"           => Threads.nthreads(),
         "wallclock_seconds" => round(Int, wallclock_seconds),
     )
 end
