@@ -85,7 +85,8 @@ function write_patch_obj(
     pts::Matrix{Float64},
     tris::Matrix{Int};
     normals::Union{Nothing, Matrix{Float64}} = nothing,
-    scalars::Union{Nothing, Vector{Float64}} = nothing
+    scalars::Union{Nothing, Vector{Float64}} = nothing,
+    scalar_range::Union{Nothing, Tuple{Float64,Float64}} = nothing
 )
     n_pts = size(pts, 2)
     open(fname, "w") do f
@@ -94,8 +95,8 @@ function write_patch_obj(
         println(f)
 
         if !isnothing(scalars)
-            # Normalize scalar to [0,1] and map through coolwarm colormap
-            smin, smax = extrema(scalars)
+            # Normalize scalar to [0,1] — use global range if provided
+            smin, smax = isnothing(scalar_range) ? extrema(scalars) : scalar_range
             if smax > smin
                 s01 = (scalars .- smin) ./ (smax - smin)
             else
@@ -433,6 +434,10 @@ function export_blender(
     obj_files = String[]
 
     # ── Tessellated surfaces (one OBJ per patch, all faces merged) ──────
+    # Pass 1: tessellate all patches and collect data + global scalar range
+    patch_data = Dict{Int, NamedTuple{(:pts,:normals,:scalars,:tris),
+                       Tuple{Matrix{Float64},Matrix{Float64},Vector{Float64},Matrix{Int}}}}()
+    global_smin = Inf;  global_smax = -Inf
     for (pc, face_list) in sort(collect(faces))
         all_pts     = zeros(3, 0)
         all_normals = zeros(3, 0)
@@ -452,11 +457,22 @@ function export_blender(
             all_tris    = hcat(all_tris, tris .+ vert_offset)
             vert_offset += size(pts, 2)
         end
+        patch_data[pc] = (pts=all_pts, normals=all_normals, scalars=all_svm, tris=all_tris)
+        if !isempty(all_svm)
+            global_smin = min(global_smin, minimum(all_svm))
+            global_smax = max(global_smax, maximum(all_svm))
+        end
+    end
+    s_range = isfinite(global_smin) ? (global_smin, global_smax) : nothing
 
+    # Pass 2: write OBJs with global scalar range
+    for (pc, _) in sort(collect(faces))
+        d = patch_data[pc]
         fname = "$(prefix)_patch_$(pc).obj"
-        write_patch_obj(fname, all_pts, all_tris;
-                        normals=all_normals,
-                        scalars=(!isnothing(scalar_fn) ? all_svm : nothing))
+        write_patch_obj(fname, d.pts, d.tris;
+                        normals=d.normals,
+                        scalars=(!isnothing(scalar_fn) ? d.scalars : nothing),
+                        scalar_range=s_range)
         push!(obj_files, fname)
     end
 
