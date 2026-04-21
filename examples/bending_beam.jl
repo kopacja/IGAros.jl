@@ -67,6 +67,21 @@ function beam_exact_disp(x::Real, y::Real, z::Real;
 end
 
 """
+    beam_exact_stress(x, y, z; p_load, E, nu, l_y) -> Matrix{Float64}(3×3)
+
+Exact Cauchy stress for pure bending: σ_xx = 2p·y/l_y, all others zero.
+"""
+function beam_exact_stress(x::Real, y::Real, z::Real;
+                            p_load::Float64 = 10.0,
+                            E::Float64      = 1000.0,
+                            nu::Float64     = 0.0,
+                            l_y::Float64    = 2.0)
+    σ = zeros(3, 3)
+    σ[1, 1] = 2 * p_load * y / l_y
+    return σ
+end
+
+"""
     arc_y_beam(x; l_x=8.0, l_y=2.0) -> y
 
 Centred y-coordinate of the arc interface at position x ∈ [0, l_x/2].
@@ -413,6 +428,73 @@ function l2_disp_error_beam(
         end
     end
 
+    return sqrt(err2), sqrt(ref2)
+end
+
+# ─── L2 stress error (3D) ────────────────────────────────────────────────────
+
+"""
+    l2_stress_error_beam(U, ID, npc, nsd, npd, p, n, KV, P, B,
+                         nen, nel, IEN, INC, materials, NQUAD,
+                         stress_fn) -> (err_abs, err_ref)
+
+L2 stress error: err² = ∫_Ω ‖σ_h − σ_ex‖_F² dΩ.
+stress_fn(x,y,z) must return a 3×3 symmetric stress tensor.
+"""
+function l2_stress_error_beam(
+    U::Vector{Float64},
+    ID::Matrix{Int},
+    npc::Int, nsd::Int, npd::Int,
+    p::Matrix{Int}, n::Matrix{Int},
+    KV::Vector{<:AbstractVector{<:AbstractVector{Float64}}},
+    P::Vector{Vector{Int}},
+    B::Matrix{Float64},
+    nen::Vector{Int}, nel::Vector{Int},
+    IEN::Vector{Matrix{Int}},
+    INC::Vector{<:AbstractVector{<:AbstractVector{Int}}},
+    materials::Vector{LinearElastic},
+    NQUAD::Int,
+    stress_fn::Function
+)::Tuple{Float64, Float64}
+
+    ncp = size(B, 1)
+    Ub  = zeros(ncp, nsd)
+    for A in 1:ncp, i in 1:nsd
+        eq = ID[i, A];  eq != 0 && (Ub[A, i] = U[eq])
+    end
+
+    err2 = 0.0;  ref2 = 0.0
+    GPW  = gauss_product(NQUAD, npd)
+
+    for pc in 1:npc
+        ien = IEN[pc]; inc = INC[pc]
+        D   = elastic_constants(materials[pc], nsd)
+        for el in 1:nel[pc]
+            anchor = ien[el, 1];  n0 = inc[anchor]
+            for (gp, gw) in GPW
+                R_s, dR_dx, _, detJ, _ = shape_function(
+                    p[pc,:], n[pc,:], KV[pc], B, P[pc], gp,
+                    nen[pc], nsd, npd, el, n0, ien, inc)
+                detJ <= 0 && continue
+                gwJ = gw * detJ
+
+                B0    = strain_displacement_matrix(nsd, nen[pc], dR_dx')
+                Ue    = vec(Ub[P[pc][ien[el,:]], 1:nsd]')
+                σ_h_v = D * (B0 * Ue)
+                σ_h_m = [σ_h_v[1] σ_h_v[4] σ_h_v[6];
+                          σ_h_v[4] σ_h_v[2] σ_h_v[5];
+                          σ_h_v[6] σ_h_v[5] σ_h_v[3]]
+
+                Xe = B[P[pc][ien[el,:]], :]
+                X  = Xe' * R_s
+                σ_ex = stress_fn(X[1], X[2], X[3])
+
+                diff_m = σ_h_m - σ_ex
+                err2 += dot(diff_m, diff_m) * gwJ
+                ref2 += dot(σ_ex,   σ_ex)   * gwJ
+            end
+        end
+    end
     return sqrt(err2), sqrt(ref2)
 end
 
@@ -763,7 +845,7 @@ function solve_beam(
     n_x_upper_base::Int           = 1,   # master (Patch 2) base x-elements
     vtk_prefix::String            = "",  # write VTK if non-empty (e.g. "beam")
     n_vis::Int                    = 4,   # VTK sampling points per knot span per direction
-)::Tuple{Float64, Float64}
+)
 
     nsd = 3;  npd = 3;  ned = 3;  npc = 2
 
@@ -892,9 +974,19 @@ function solve_beam(
     U, _ = solve_mortar(K_bc, C_bc, Z, F_bc)
 
     disp_fn = (x, y, z) -> beam_exact_disp(x, y, z; p_load=p_load, E=E, l_x=l_x, l_y=l_y)
-    err_abs, err_ref = l2_disp_error_beam(
+    l2_abs, l2_ref = l2_disp_error_beam(
         U, ID, npc, nsd, npd, p_mat, n_mat_ref, KV_ref, P_ref, B_ref,
         nen, nel, IEN, INC, NQUAD, disp_fn
+    )
+
+    stress_fn = (x, y, z) -> beam_exact_stress(x, y, z; p_load=p_load, E=E, nu=nu, l_y=l_y)
+    σ_abs, σ_ref = l2_stress_error_beam(
+        U, ID, npc, nsd, npd, p_mat, n_mat_ref, KV_ref, P_ref, B_ref,
+        nen, nel, IEN, INC, mats, NQUAD, stress_fn
+    )
+    en_abs, en_ref = energy_error_beam(
+        U, ID, npc, nsd, npd, p_mat, n_mat_ref, KV_ref, P_ref, B_ref,
+        nen, nel, IEN, INC, mats, NQUAD, stress_fn
     )
 
     if !isempty(vtk_prefix)
@@ -903,7 +995,9 @@ function solve_beam(
                        nen, IEN, INC, E, nu; n_vis=n_vis)
     end
 
-    return err_abs / err_ref, err_abs
+    return (l2_rel=l2_abs/l2_ref, l2_abs=l2_abs,
+            σ_rel=σ_abs/σ_ref, σ_abs=σ_abs,
+            en_rel=en_abs/en_ref, en_abs=en_abs)
 end
 
 # ─── Single-level solve p=1 ───────────────────────────────────────────────────

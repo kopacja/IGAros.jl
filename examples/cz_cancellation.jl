@@ -118,7 +118,10 @@ function flat_patch_test(
     U, Lambda = solve_mortar(K_bc, C, Z, F_bc)
 
     return (U=U, C=C, Z=Z, K_bc=K_bc, F_bc=F_bc, ID=ID, B=B, ncp=ncp,
-            neq=neq, Pc=Pc, E=E)
+            neq=neq, Pc=Pc, E=E,
+            p_mat=p, n_mat=n, KV=KV, P=P,
+            nel=nel, nnp=nnp, nen=nen, IEN=IEN, INC=INC,
+            nsd=nsd, npd=npd, npc=npc)
 end
 
 # ─────────────────────── Higher-order flat patch test ─────────────────────
@@ -238,7 +241,10 @@ function flat_patch_test_hp(
     U, Lambda = solve_mortar(K_bc, C, Z, F_bc)
 
     return (U=U, C=C, Z=Z, K_bc=K_bc, F_bc=F_bc, ID=ID, B=B, ncp=ncp,
-            neq=neq, Pc=Pc, E=E)
+            neq=neq, Pc=Pc, E=E,
+            p_mat=p_mat, n_mat=n_mat, KV=KV, P=P,
+            nel=nel, nnp=nnp, nen=nen, IEN=IEN, INC=INC,
+            nsd=nsd, npd=npd, npc=npc)
 end
 
 # ─────────────────────── Displacement error vs exact ─────────────────────
@@ -252,6 +258,65 @@ function disp_error(U, ID, B, ncp, E)
         ref2 += ux_ex^2
     end
     return sqrt(err2 / ref2)
+end
+
+"""
+    l2_disp_error_flat(U, ID, npc, nsd, npd, p, n, KV, P, B,
+                       nen, nel, IEN, INC, NQUAD, E; thickness=1.0) -> Float64
+
+Continuous L² relative displacement error for the flat patch test:
+  ‖e_u‖_rel = ‖u_h − u_ex‖_{L²} / ‖u_ex‖_{L²}
+
+Exact solution: u_x = x/E, u_y = 0.
+"""
+function l2_disp_error_flat(
+    U::Vector{Float64}, ID::Matrix{Int},
+    npc::Int, nsd::Int, npd::Int,
+    p::Matrix{Int}, n::Matrix{Int},
+    KV, P::Vector{Vector{Int}}, B::Matrix{Float64},
+    nen::Vector{Int}, nel::Vector{Int},
+    IEN::Vector{Matrix{Int}},
+    INC::Vector{<:AbstractVector{<:AbstractVector{Int}}},
+    NQUAD::Int, E::Float64; thickness::Float64=1.0
+)
+    ncp = size(B, 1)
+    Ub  = zeros(ncp, nsd)
+    for A in 1:ncp, i in 1:nsd
+        eq = ID[i, A]; eq != 0 && (Ub[A, i] = U[eq])
+    end
+
+    err2 = 0.0; ref2 = 0.0
+    GPW = gauss_product(NQUAD, npd)
+
+    for pc in 1:npc
+        ien = IEN[pc]; inc = INC[pc]
+        for el in 1:nel[pc]
+            anchor = ien[el, 1]; n0 = inc[anchor]
+            for (gp, gw) in GPW
+                R_s, _, _, detJ, _ = shape_function(
+                    p[pc,:], n[pc,:], KV[pc], B, P[pc], gp,
+                    nen[pc], nsd, npd, el, n0, ien, inc)
+                detJ <= 0 && continue
+                gwJ = gw * detJ * thickness
+
+                # FE displacement
+                Ue_mat = Ub[P[pc][ien[el,:]], 1:nsd]
+                u_h = Ue_mat' * R_s   # (nsd,)
+
+                # Physical coordinates
+                Xe = B[P[pc][ien[el,:]], :]
+                X  = Xe' * R_s
+
+                # Exact: u_x = x/E, u_y = 0
+                u_ex = [X[1] / E, 0.0]
+
+                diff = u_h[1:nsd] - u_ex
+                err2 += dot(diff, diff) * gwJ
+                ref2 += dot(u_ex, u_ex) * gwJ
+            end
+        end
+    end
+    return sqrt(err2), sqrt(ref2)
 end
 
 # ─────────────────────── First-order perturbation analysis ────────────────
