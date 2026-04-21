@@ -138,7 +138,12 @@ end
 const OUTDIR = joinpath(@__DIR__, "..", "..")   # twin_mortar/ root
 
 function save_figure(ax, stem)
-    pgfsave(joinpath(OUTDIR, "$stem.tex"), ax)   # always succeeds (plain text)
+    # Save .tex (plain text, no LaTeX engine needed)
+    texpath = joinpath(OUTDIR, "$stem.tex")
+    open(texpath, "w") do io
+        PGFPlotsX.print_tex(io, ax)
+    end
+    # Try PDF (needs LaTeX)
     try
         pgfsave(joinpath(OUTDIR, "$stem.pdf"), ax)
         println("Saved: $stem.{pdf,tex}")
@@ -1413,7 +1418,197 @@ end
 # Dispatch
 # ════════════════════════════════════════════════════════════════════════════
 
-const ALL_CASES = ["plate_nc", "plate_c", "plate_formulation", "plate_rate_table", "cylinders", "sphere", "sphere_l2disp", "formulation", "conditioning", "nquad_disp", "disp_p2", "beam", "beam_normal_strategy", "eps_sensitivity", "patch_lambda", "cyl_spms_tm", "cyl_moments", "cyl_conditioning", "cyl_cond_eps"]
+# ════════════════════════════════════════════════════════════════════════════
+# Deltoidal sphere plots (§6.6)
+# ════════════════════════════════════════════════════════════════════════════
+
+# Base mesh sizes per degree
+const _SPHERE_BASE = Dict(
+    1 => (n_out=2, n_in=3, n_rad=1),
+    2 => (n_out=2, n_in=3, n_rad=1),
+    3 => (n_out=1, n_in=2, n_rad=1),
+    4 => (n_out=1, n_in=2, n_rad=1),
+)
+
+function run_sphere_deltoidal_l2disp()
+    println("\n── Sphere (deltoidal): L2 displacement, p=1,2,3,4 ───────────────────")
+    degrees   = [1, 2, 3, 4]
+    exp_range = 0:3
+    epss      = 1e4
+
+    sphere_solver = function(p, e)
+        bm = _SPHERE_BASE[p]
+        r  = solve_sphere_deltoidal(p, e; epss=epss,
+                n_ang_outer_base=bm.n_out,
+                n_ang_inner_base=bm.n_in,
+                n_rad_base=bm.n_rad)
+        return r.l2_rel, r.l2_abs
+    end
+    h_per_p = Dict(p => [1.0 / (_SPHERE_BASE[p].n_out * 2^e) for e in exp_range]
+                   for p in degrees)
+    errs = collect_errors(sphere_solver, degrees, Dict(p => exp_range for p in degrees))
+    save_figure(make_axis(h_per_p, errs, degrees, "Pressurized sphere (deltoidal)";
+                          ylabel_str = L"\|e_u\|_{L^2(\Omega)}"),
+                "convergence_sphere_l2disp")
+end
+
+function run_sphere_deltoidal_energy()
+    println("\n── Sphere (deltoidal): energy-norm error, p=1,2,3,4 ─────────────────")
+    degrees   = [1, 2, 3, 4]
+    exp_range = 0:3
+    epss      = 1e4
+
+    sphere_solver = function(p, e)
+        bm = _SPHERE_BASE[p]
+        r  = solve_sphere_deltoidal(p, e; epss=epss,
+                n_ang_outer_base=bm.n_out,
+                n_ang_inner_base=bm.n_in,
+                n_rad_base=bm.n_rad)
+        return r.en_rel, r.en_abs
+    end
+    h_per_p = Dict(p => [1.0 / (_SPHERE_BASE[p].n_out * 2^e) for e in exp_range]
+                   for p in degrees)
+    errs = collect_errors(sphere_solver, degrees, Dict(p => exp_range for p in degrees))
+    save_figure(make_axis(h_per_p, errs, degrees, "Pressurized sphere (deltoidal)";
+                          ylabel_str = L"\|e\|_E"),
+                "convergence_sphere_energy")
+end
+
+function _run_sphere_eps_plot(value_fn, ylabel_str, stem)
+    degrees   = [1, 2, 3, 4]
+    exp_level = 1
+    eps_range = 10 .^ (-2:0.5:7)
+
+    elements = []
+    legend_labels = String[]
+
+    for p_ord in degrees
+        vals = Float64[]
+        bm   = _SPHERE_BASE[p_ord]
+        for eps in eps_range
+            try
+                r = solve_sphere_deltoidal(p_ord, exp_level; epss=Float64(eps),
+                        n_ang_outer_base=bm.n_out,
+                        n_ang_inner_base=bm.n_in,
+                        n_rad_base=bm.n_rad)
+                push!(vals, value_fn(r))
+            catch
+                push!(vals, NaN)
+            end
+            @printf("  p=%d  ε=%.1e  val=%.4e\n", p_ord, eps, vals[end])
+        end
+
+        push!(elements, Plot(
+            PGFPlotsX.Options(
+                COLORS[p_ord] => nothing,
+                "mark"        => MARKS[p_ord],
+                LSTYLES[p_ord] => nothing,
+                "mark size"   => "2pt",
+                "line width"  => "1pt"),
+            Coordinates(collect(eps_range), vals)))
+        push!(legend_labels, "p=$p_ord")
+    end
+
+    ax = @pgf Axis(
+        {
+            xmode            = "log",
+            ymode            = "log",
+            xlabel           = L"\varepsilon",
+            ylabel           = ylabel_str,
+            title            = "Pressurized sphere: \\varepsilon-sensitivity (exp=$exp_level)",
+            width            = "9cm",
+            height           = "7cm",
+            legend_pos       = "outer north east",
+            legend_style     = "font=\\footnotesize, row sep=-2pt",
+            tick_label_style = "font=\\footnotesize",
+            label_style      = "font=\\small",
+            title_style      = "font=\\small",
+            grid             = "major",
+            grid_style       = "{gray!25, line width=0.4pt}",
+            unbounded_coords = "jump",
+        },
+        elements...,
+        Legend(legend_labels...)
+    )
+    save_figure(ax, stem)
+end
+
+function run_sphere_eps()
+    println("\n── Sphere (deltoidal): ε-sensitivity, L2 displacement ────────────────")
+    _run_sphere_eps_plot(r -> r.l2_abs,
+        L"\|e_u\|_{L^2(\Omega)}",
+        "convergence_sphere_eps")
+end
+
+function run_sphere_eps_energy()
+    println("\n── Sphere (deltoidal): ε-sensitivity, energy norm ────────────────────")
+    _run_sphere_eps_plot(r -> r.en_abs,
+        L"\|e\|_E",
+        "convergence_sphere_eps_energy")
+end
+
+function run_sphere_conditioning()
+    println("\n── Sphere (deltoidal): conditioning vs ε ──────────────────────────────")
+
+    degrees   = [1, 2, 3, 4]
+    exp_level = 1
+    eps_range = 10 .^ (-2:0.5:7)
+
+    elements = []
+    legend_labels = String[]
+
+    for p_ord in degrees
+        kappas = Float64[]
+        bm     = _SPHERE_BASE[p_ord]
+        for eps in eps_range
+            try
+                r = solve_sphere_deltoidal_diag(p_ord, exp_level; epss=Float64(eps),
+                        n_ang_outer_base=bm.n_out,
+                        n_ang_inner_base=bm.n_in,
+                        n_rad_base=bm.n_rad)
+                push!(kappas, r.kappa)
+            catch
+                push!(kappas, NaN)
+            end
+            @printf("  p=%d  ε=%.1e  κ=%.3e\n", p_ord, eps, kappas[end])
+        end
+
+        push!(elements, Plot(
+            PGFPlotsX.Options(
+                COLORS[p_ord] => nothing,
+                "mark"        => MARKS[p_ord],
+                LSTYLES[p_ord] => nothing,
+                "mark size"   => "2pt",
+                "line width"  => "1pt"),
+            Coordinates(collect(eps_range), kappas)))
+        push!(legend_labels, "p=$p_ord")
+    end
+
+    ax = @pgf Axis(
+        {
+            xmode            = "log",
+            ymode            = "log",
+            xlabel           = L"\varepsilon",
+            ylabel           = L"\kappa(\mathbf{A})",
+            title            = "Pressurized sphere: conditioning (exp=$exp_level)",
+            width            = "9cm",
+            height           = "7cm",
+            legend_pos       = "outer north east",
+            legend_style     = "font=\\footnotesize, row sep=-2pt",
+            tick_label_style = "font=\\footnotesize",
+            label_style      = "font=\\small",
+            title_style      = "font=\\small",
+            grid             = "major",
+            grid_style       = "{gray!25, line width=0.4pt}",
+            unbounded_coords = "jump",
+        },
+        elements...,
+        Legend(legend_labels...)
+    )
+    save_figure(ax, "convergence_sphere_conditioning")
+end
+
+const ALL_CASES = ["plate_nc", "plate_c", "plate_formulation", "plate_rate_table", "cylinders", "sphere", "sphere_l2disp", "formulation", "conditioning", "nquad_disp", "disp_p2", "beam", "beam_normal_strategy", "eps_sensitivity", "patch_lambda", "cyl_spms_tm", "cyl_moments", "cyl_conditioning", "cyl_cond_eps", "sphere_delt_l2disp", "sphere_delt_energy", "sphere_eps", "sphere_eps_energy", "sphere_cond"]
 const CASE_FNS  = Dict(
     "plate_nc"             => run_plate_nc,
     "plate_c"              => run_plate_c,
@@ -1434,6 +1629,11 @@ const CASE_FNS  = Dict(
     "cyl_moments"          => run_cyl_moments,
     "cyl_conditioning"     => run_cyl_conditioning,
     "cyl_cond_eps"         => run_cyl_cond_eps,
+    "sphere_delt_l2disp"   => run_sphere_deltoidal_l2disp,
+    "sphere_delt_energy"   => run_sphere_deltoidal_energy,
+    "sphere_eps"           => run_sphere_eps,
+    "sphere_eps_energy"    => run_sphere_eps_energy,
+    "sphere_cond"          => run_sphere_conditioning,
 )
 
 requested = isempty(ARGS) ? ALL_CASES : ARGS

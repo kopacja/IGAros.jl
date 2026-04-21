@@ -4,6 +4,8 @@ version = "0.1.0"
 authors = ["Jan Kopacka"]
 
 [deps]
+CairoMakie = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
+Contour = "d38c429a-6771-53c6-b99e-75d170b6e991"
 DoubleFloats = "497a8b3b-efae-58df-a0af-a86822472b78"
 LDLFactorizations = "40e66cde-538c-5869-a4ad-c39174c6795b"
 LaTeXStrings = "b964fa9f-0449-5b57-a5c2-d3ea65f4040f"
@@ -13,6 +15,8 @@ SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 
 [compat]
+CairoMakie = "0.15.9"
+Contour = "0.6.3"
 DoubleFloats = "1.6.2"
 LDLFactorizations = "0.10.1"
 LaTeXStrings = "1.4.0"
