@@ -29,10 +29,14 @@ strings / `false` for fields that cannot be resolved so that
 `TOML.print` never fails at write time.
 """
 function capture_code_provenance(igaros_root::AbstractString = _DEFAULT_IGAROS_ROOT)
+    # `--untracked-files=no` so SLURM .out logs, editor backups, and
+    # other runtime artefacts do not flag the run as dirty. Reproducibility
+    # cares whether tracked files differ from HEAD, not about fresh noise
+    # in the working directory.
     return Dict(
         "igaros_commit" => _git(igaros_root, "rev-parse", "--short", "HEAD"),
         "igaros_branch" => _git(igaros_root, "rev-parse", "--abbrev-ref", "HEAD"),
-        "igaros_dirty"  => !isempty(_git(igaros_root, "status", "--porcelain")),
+        "igaros_dirty"  => !isempty(_git(igaros_root, "status", "--porcelain", "--untracked-files=no")),
         "julia_version" => string(VERSION),
     )
 end
