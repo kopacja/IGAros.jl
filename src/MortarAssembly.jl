@@ -205,13 +205,13 @@ function _accumulate_mortar!(
                 As_c   = findfirst(==(cp_s_c), Pc)
                 As_c === nothing && continue
                 for d in 1:n_dirs
-                    C[eq_i, As_c + (d-1)*nlm] += dir_vecs[i, d] * R_s[b] * R_s[c] * gwJ
+                    C[eq_i, As_c + (d-1)*nlm] += 0.5 * dir_vecs[i, d] * R_s[b] * R_s[c] * gwJ
                 end
             end
         end
     end
 
-    # ── C: slave disp rows, master multiplier cols  −M^(sm) ──────────────────
+    # ── C: slave disp rows, master multiplier cols  −½M^(sm) ─────────────────
     for b in 1:nsen_s
         cp_s_b = slave_cps[b]
         for i in 1:ned
@@ -222,35 +222,36 @@ function _accumulate_mortar!(
                 Am_c   = findfirst(==(cp_m_c), Pc)
                 Am_c === nothing && continue
                 for d in 1:n_dirs
-                    C[eq_i, Am_c + (d-1)*nlm] -= dir_vecs[i, d] * R_s[b] * R_m[c] * gwJ
+                    C[eq_i, Am_c + (d-1)*nlm] -= 0.5 * dir_vecs[i, d] * R_s[b] * R_m[c] * gwJ
                 end
             end
         end
     end
 
-    # ── Z: -(ε/2)(R_s + R_m)(R_s + R_m)^T  (penalizes flux sum λ^s + λ̄^m) ─
+    # ── Z: +(ε/2)(R_s + R_m)(R_s + R_m)^T  (positive-definite stabilization)
+    # The KKT system uses [K C; C' +Z], so Z is stored as positive definite.
     for b in 1:nsen_s
         cp_s_b = slave_cps[b]
         As_b   = findfirst(==(cp_s_b), Pc)
         As_b === nothing && continue
 
-        # Z: slave-slave  [-ε/2] per direction
+        # Z: slave-slave  [+ε/2] per direction
         for c in 1:nsen_s
             cp_s_c = slave_cps[c]
             As_c   = findfirst(==(cp_s_c), Pc)
             As_c === nothing && continue
             for d in 1:n_dirs
-                Z[As_b + (d-1)*nlm, As_c + (d-1)*nlm] -= 0.5 * epss * R_s[b] * R_s[c] * gwJ
+                Z[As_b + (d-1)*nlm, As_c + (d-1)*nlm] += 0.5 * epss * R_s[b] * R_s[c] * gwJ
             end
         end
 
-        # Z: slave-master  [-ε/2] per direction
+        # Z: slave-master  [+ε/2] per direction
         for c in 1:nsen_m
             cp_m_c = master_cps[c]
             Am_c   = findfirst(==(cp_m_c), Pc)
             Am_c === nothing && continue
             for d in 1:n_dirs
-                Z[As_b + (d-1)*nlm, Am_c + (d-1)*nlm] -= 0.5 * epss * R_s[b] * R_m[c] * gwJ
+                Z[As_b + (d-1)*nlm, Am_c + (d-1)*nlm] += 0.5 * epss * R_s[b] * R_m[c] * gwJ
             end
         end
     end
@@ -261,23 +262,23 @@ function _accumulate_mortar!(
         Am_b   = findfirst(==(cp_m_b), Pc)
         Am_b === nothing && continue
 
-        # Z: master-slave  [-ε/2] per direction
+        # Z: master-slave  [+ε/2] per direction
         for c in 1:nsen_s
             cp_s_c = slave_cps[c]
             As_c   = findfirst(==(cp_s_c), Pc)
             As_c === nothing && continue
             for d in 1:n_dirs
-                Z[Am_b + (d-1)*nlm, As_c + (d-1)*nlm] -= 0.5 * epss * R_m[bm] * R_s[c] * gwJ
+                Z[Am_b + (d-1)*nlm, As_c + (d-1)*nlm] += 0.5 * epss * R_m[bm] * R_s[c] * gwJ
             end
         end
 
-        # Z: master-master  [-ε/2] per direction
+        # Z: master-master  [+ε/2] per direction
         for cm in 1:nsen_m
             cp_m_c = master_cps[cm]
             Am_c   = findfirst(==(cp_m_c), Pc)
             Am_c === nothing && continue
             for d in 1:n_dirs
-                Z[Am_b + (d-1)*nlm, Am_c + (d-1)*nlm] -= 0.5 * epss * R_m[bm] * R_m[cm] * gwJ
+                Z[Am_b + (d-1)*nlm, Am_c + (d-1)*nlm] += 0.5 * epss * R_m[bm] * R_m[cm] * gwJ
             end
         end
     end
@@ -318,7 +319,7 @@ function _accumulate_mortar_dp!(
     #    C_paper[λ^s, U^s] = +D^(s)    → C_code[U^s, λ^s] += D   (slave disp, slave mult)
     #    C_paper[λ^s, U^m] = −M^(ms)   → C_code[U^m, λ^s] -= M^T (master disp, slave mult)
     #
-    # D^(s) block: slave disp rows ← slave multiplier cols
+    # ½D^(s) block: slave disp rows ← slave multiplier cols
     for b in 1:nsen_s
         cp_s_b = slave_cps[b]
         for i in 1:ned
@@ -329,12 +330,12 @@ function _accumulate_mortar_dp!(
                 As_c   = findfirst(==(cp_s_c), Pc)
                 As_c === nothing && continue
                 for d in 1:n_dirs
-                    C[eq_i, As_c + (d-1)*nlm] += dir_vecs[i, d] * R_s[b] * R_s[c] * gwJ
+                    C[eq_i, As_c + (d-1)*nlm] += 0.5 * dir_vecs[i, d] * R_s[b] * R_s[c] * gwJ
                 end
             end
         end
     end
-    # −M^T block: master disp rows ← slave multiplier cols
+    # −½M^T block: master disp rows ← slave multiplier cols
     for b in 1:nsen_m
         cp_m_b = master_cps[b]
         for i in 1:ned
@@ -345,38 +346,38 @@ function _accumulate_mortar_dp!(
                 As_c   = findfirst(==(cp_s_c), Pc)
                 As_c === nothing && continue
                 for d in 1:n_dirs
-                    C[eq_i, As_c + (d-1)*nlm] -= dir_vecs[i, d] * R_m[b] * R_s[c] * gwJ
+                    C[eq_i, As_c + (d-1)*nlm] -= 0.5 * dir_vecs[i, d] * R_m[b] * R_s[c] * gwJ
                 end
             end
         end
     end
 
     # ── Z: stabilization, slave rows only ───────────────────────────────────
-    #  Z_paper = ε·[D^(s), M^(sm); M^(ms), D^(m)]  (positive definite)
-    #  Z_code  = −Z_paper  (solver uses [K,C; C',−Z])
-    #  Pass s assembles row s: Z_code[λ^s, λ^s] = −ε·D^s, Z_code[λ^s, λ^m] = −ε·M^sm
+    #  Z = ε·[D^(s), M^(sm); M^(ms), D^(m)]  (positive definite)
+    #  Solver uses [K, C; C', +Z].
+    #  Pass s assembles row s: Z[λ^s, λ^s] = +ε·D^s, Z[λ^s, λ^m] = +ε·M^sm
     for b in 1:nsen_s
         cp_s_b = slave_cps[b]
         As_b   = findfirst(==(cp_s_b), Pc)
         As_b === nothing && continue
 
-        # Z_ss: −ε·D^s
+        # Z_ss: +ε·D^s
         for c in 1:nsen_s
             cp_s_c = slave_cps[c]
             As_c   = findfirst(==(cp_s_c), Pc)
             As_c === nothing && continue
             for d in 1:n_dirs
-                Z[As_b + (d-1)*nlm, As_c + (d-1)*nlm] -= epss * R_s[b] * R_s[c] * gwJ
+                Z[As_b + (d-1)*nlm, As_c + (d-1)*nlm] += epss * R_s[b] * R_s[c] * gwJ
             end
         end
 
-        # Z_sm: −ε·M^sm
+        # Z_sm: +ε·M^sm
         for c in 1:nsen_m
             cp_m_c = master_cps[c]
             Am_c   = findfirst(==(cp_m_c), Pc)
             Am_c === nothing && continue
             for d in 1:n_dirs
-                Z[As_b + (d-1)*nlm, Am_c + (d-1)*nlm] -= epss * R_s[b] * R_m[c] * gwJ
+                Z[As_b + (d-1)*nlm, Am_c + (d-1)*nlm] += epss * R_s[b] * R_m[c] * gwJ
             end
         end
     end
@@ -439,12 +440,19 @@ function _assemble_pair!(
                 η_s = 0.5*(kv2[n0_s[2]+1]+kv2[n0_s[2]]) +
                        0.5*(kv2[n0_s[2]+1]-kv2[n0_s[2]]) * gp[2]
 
-                ξ_m, η_m, _, _, _, R_m, spans_m = closest_point_2d(
+                ξ_m, η_m, x_m_proj, _, _, R_m, spans_m = closest_point_2d(
                     clamp(ξ_s, 0.0, 1.0), clamp(η_s, 0.0, 1.0),
                     x_s, pm, nm, KVm, B, Pm, nsd
                 )
-                (ξ_m > 1.0+1e-10 || ξ_m < -1e-10 ||
-                 η_m > 1.0+1e-10 || η_m < -1e-10) && continue
+                # Skip if projected point is on the master boundary AND
+                # the slave point is far from it (= outside the overlap).
+                # closest_point_2d clamps to [0,1]², so check physical gap.
+                on_boundary = (ξ_m < 1e-12 || ξ_m > 1.0 - 1e-12 ||
+                               η_m < 1e-12 || η_m > 1.0 - 1e-12)
+                if on_boundary
+                    gap = norm(x_s - x_m_proj)
+                    gap > 1e-10 && continue
+                end
 
                 slave_cps = [Ps[IEN_s[sel, b]] for b in 1:nsen_s]
                 span_ξm, span_ηm = spans_m[1], spans_m[2]
@@ -830,55 +838,140 @@ function _assemble_mass_pair!(
     pm, nm, KVm, Pm, norm_sign_m,
     B, nsd, npd, NQUAD, s_map, m_map
 )
-    npd == 2 || error("Segment-based _assemble_mass_pair! only implemented for 2D (1D interfaces)")
+    if npd == 2
+        # ── 2D: 1D segment-based (knot-span intersections) ──────────────
 
-    ξ_breaks = find_interface_segments_1d(
-        ps[1], ns[1], KVs[1], pm[1], nm[1], KVm[1], B, Ps, Pm, nsd
-    )
+        ξ_breaks = find_interface_segments_1d(
+            ps[1], ns[1], KVs[1], pm[1], nm[1], KVm[1], B, Ps, Pm, nsd
+        )
 
-    pts1d, wts1d = gauss_rule(NQUAD)
-    nsen_m_local = pm[1] + 1
+        pts1d, wts1d = gauss_rule(NQUAD)
+        nsen_m_local = pm[1] + 1
 
-    for k in 1:(length(ξ_breaks) - 1)
-        ξ_a, ξ_b = ξ_breaks[k], ξ_breaks[k+1]
-        ξ_b - ξ_a < 1e-14 && continue
+        for k in 1:(length(ξ_breaks) - 1)
+            ξ_a, ξ_b = ξ_breaks[k], ξ_breaks[k+1]
+            ξ_b - ξ_a < 1e-14 && continue
 
-        dξ = 0.5 * (ξ_b - ξ_a)
+            dξ = 0.5 * (ξ_b - ξ_a)
 
-        for q in 1:NQUAD
-            ξ_s = 0.5 * (ξ_a + ξ_b) + dξ * pts1d[q]
+            for q in 1:NQUAD
+                ξ_s = 0.5 * (ξ_a + ξ_b) + dξ * pts1d[q]
 
-            x_s, dxdξ_s, R_s, span_s = eval_boundary_point(
-                ξ_s, ps[1], ns[1], KVs[1], B, Ps, nsd
-            )
-            detJ_s = norm(dxdξ_s)
-            gwJ    = wts1d[q] * dξ * detJ_s
+                x_s, dxdξ_s, R_s, span_s = eval_boundary_point(
+                    ξ_s, ps[1], ns[1], KVs[1], B, Ps, nsd
+                )
+                detJ_s = norm(dxdξ_s)
+                gwJ    = wts1d[q] * dξ * detJ_s
 
-            ξ_m, _, _, R_m, span_m = closest_point_1d(
-                clamp(ξ_s, 0.0, 1.0), x_s, pm[1], nm[1], KVm[1], B, Pm, nsd
-            )
-            (ξ_m > 1.0 + 1e-10 || ξ_m < -1e-10) && continue
+                ξ_m, _, _, R_m, span_m = closest_point_1d(
+                    clamp(ξ_s, 0.0, 1.0), x_s, pm[1], nm[1], KVm[1], B, Pm, nsd
+                )
+                (ξ_m > 1.0 + 1e-10 || ξ_m < -1e-10) && continue
 
-            slave_cps  = [Ps[span_s - ps[1] + b - 1] for b in 1:(ps[1]+1)]
-            master_cps = [Pm[span_m - pm[1] + c - 1] for c in 1:nsen_m_local]
+                slave_cps  = [Ps[span_s - ps[1] + b - 1] for b in 1:(ps[1]+1)]
+                master_cps = [Pm[span_m - pm[1] + c - 1] for c in 1:nsen_m_local]
 
-            for b in 1:length(slave_cps)
-                ib = get(s_map, slave_cps[b], 0)
-                ib == 0 && continue
-                for c in 1:length(slave_cps)
-                    ic = get(s_map, slave_cps[c], 0)
-                    ic == 0 && continue
-                    D[ib, ic] += R_s[b] * R_s[c] * gwJ
+                for b in 1:length(slave_cps)
+                    ib = get(s_map, slave_cps[b], 0)
+                    ib == 0 && continue
+                    for c in 1:length(slave_cps)
+                        ic = get(s_map, slave_cps[c], 0)
+                        ic == 0 && continue
+                        D[ib, ic] += R_s[b] * R_s[c] * gwJ
+                    end
+                end
+
+                for b in 1:length(slave_cps)
+                    ib = get(s_map, slave_cps[b], 0)
+                    ib == 0 && continue
+                    for c in 1:length(master_cps)
+                        jc = get(m_map, master_cps[c], 0)
+                        jc == 0 && continue
+                        M_mat[ib, jc] += R_s[b] * R_m[c] * gwJ
+                    end
                 end
             end
+        end
 
-            for b in 1:length(slave_cps)
-                ib = get(s_map, slave_cps[b], 0)
-                ib == 0 && continue
-                for c in 1:length(master_cps)
-                    jc = get(m_map, master_cps[c], 0)
-                    jc == 0 && continue
-                    M_mat[ib, jc] += R_s[b] * R_m[c] * gwJ
+    else
+        # ── 3D: 2D segment-based (Sutherland-Hodgman polygon clipping) ──
+
+        cells = find_interface_segments_2d(ps, ns, KVs, pm, nm, KVm, B, Ps, Pm, nsd)
+        tri_pts, tri_wts = tri_gauss_rule(NQUAD)
+        npts = length(tri_wts)
+
+        for cell in cells
+            v1 = cell.verts[:, 1]
+            v2 = cell.verts[:, 2]
+            v3 = cell.verts[:, 3]
+            J_tri = norm(cross(v2 .- v1, v3 .- v1)) / 2.0
+            J_tri < 1e-20 && continue
+
+            for q in 1:npts
+                ξ_ref = tri_pts[:, q]
+                w_q   = tri_wts[q]
+
+                N1 = 1.0 - ξ_ref[1] - ξ_ref[2]
+                N2 = ξ_ref[1]
+                N3 = ξ_ref[2]
+                x_q = N1 .* v1 .+ N2 .* v2 .+ N3 .* v3
+
+                ξ_s, η_s, _, _, _, R_s, spans_s = closest_point_2d(
+                    cell.ξ0_s, cell.η0_s, x_q, ps, ns, KVs, B, Ps, nsd
+                )
+                (ξ_s > 1.0 + 1e-10 || ξ_s < -1e-10 ||
+                 η_s > 1.0 + 1e-10 || η_s < -1e-10) && continue
+
+                ξ_m, η_m, _, _, _, R_m, spans_m = closest_point_2d(
+                    cell.ξ0_m, cell.η0_m, x_q, pm, nm, KVm, B, Pm, nsd
+                )
+                (ξ_m > 1.0 + 1e-10 || ξ_m < -1e-10 ||
+                 η_m > 1.0 + 1e-10 || η_m < -1e-10) && continue
+
+                # Active slave CPs
+                span_ξs, span_ηs = spans_s[1], spans_s[2]
+                slave_cps = Int[]
+                for b in 1:(ps[2]+1)
+                    η_loc = span_ηs - ps[2] + b - 1
+                    for a in 1:(ps[1]+1)
+                        ξ_loc = span_ξs - ps[1] + a - 1
+                        push!(slave_cps, Ps[(η_loc - 1)*ns[1] + ξ_loc])
+                    end
+                end
+
+                # Active master CPs
+                span_ξm, span_ηm = spans_m[1], spans_m[2]
+                master_cps = Int[]
+                for b in 1:(pm[2]+1)
+                    η_loc = span_ηm - pm[2] + b - 1
+                    for a in 1:(pm[1]+1)
+                        ξ_loc = span_ξm - pm[1] + a - 1
+                        push!(master_cps, Pm[(η_loc - 1)*nm[1] + ξ_loc])
+                    end
+                end
+
+                gwJ = w_q * 2.0 * J_tri
+
+                # Accumulate D = ∫ R_s R_s^T dΓ
+                for b in 1:length(slave_cps)
+                    ib = get(s_map, slave_cps[b], 0)
+                    ib == 0 && continue
+                    for c in 1:length(slave_cps)
+                        ic = get(s_map, slave_cps[c], 0)
+                        ic == 0 && continue
+                        D[ib, ic] += R_s[b] * R_s[c] * gwJ
+                    end
+                end
+
+                # Accumulate M = ∫ R_s R_m^T dΓ
+                for b in 1:length(slave_cps)
+                    ib = get(s_map, slave_cps[b], 0)
+                    ib == 0 && continue
+                    for c in 1:length(master_cps)
+                        jc = get(m_map, master_cps[c], 0)
+                        jc == 0 && continue
+                        M_mat[ib, jc] += R_s[b] * R_m[c] * gwJ
+                    end
                 end
             end
         end

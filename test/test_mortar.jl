@@ -158,8 +158,8 @@ using SparseArrays
         # Z is not symmetric for non-conforming meshes (different integration
         # domains per half-pass), so we only check the diagonal blocks are negative
         # (slave-slave terms: -ε * ∫ R R dΓ < 0)
-        @test all(diag(Matrix(Z))[1:nlm]     .<= 0.0)
-        @test all(diag(Matrix(Z))[nlm+1:end] .<= 0.0)
+        @test all(diag(Matrix(Z))[1:nlm]     .>= 0.0)
+        @test all(diag(Matrix(Z))[nlm+1:end] .>= 0.0)
 
         # ── Solve KKT system ─────────────────────────────────────────────────
         U, Lambda = solve_mortar(K_bc, C, Z, F_bc)
@@ -270,8 +270,8 @@ using SparseArrays
         )
         @test size(C) == (neq, 2 * nlm)
         @test size(Z) == (2 * nlm, 2 * nlm)
-        @test all(diag(Matrix(Z))[1:nlm]     .<= 0.0)
-        @test all(diag(Matrix(Z))[nlm+1:end] .<= 0.0)
+        @test all(diag(Matrix(Z))[1:nlm]     .>= 0.0)
+        @test all(diag(Matrix(Z))[nlm+1:end] .>= 0.0)
 
         U, Lambda = solve_mortar(K_bc, C, Z, F_bc)
 
@@ -410,8 +410,8 @@ using SparseArrays
         @test size(Z) == (2 * nlm, 2 * nlm)
         # Z must be symmetric (by construction) and have non-positive diagonal
         @test norm(Matrix(Z) - Matrix(Z)') < 1e-12
-        @test all(diag(Matrix(Z))[1:nlm]     .<= 0.0)
-        @test all(diag(Matrix(Z))[nlm+1:end] .<= 0.0)
+        @test all(diag(Matrix(Z))[1:nlm]     .>= 0.0)
+        @test all(diag(Matrix(Z))[nlm+1:end] .>= 0.0)
 
         U, Lambda = solve_mortar(K_bc, C, Z, F_bc)
 
@@ -501,8 +501,8 @@ using SparseArrays
         @test size(C) == (neq, 2 * nlm)
         @test size(Z) == (2 * nlm, 2 * nlm)
         @test norm(Matrix(Z) - Matrix(Z)') < 1e-12
-        @test all(diag(Matrix(Z))[1:nlm]     .<= 0.0)
-        @test all(diag(Matrix(Z))[nlm+1:end] .<= 0.0)
+        @test all(diag(Matrix(Z))[1:nlm]     .>= 0.0)
+        @test all(diag(Matrix(Z))[nlm+1:end] .>= 0.0)
 
         U, Lambda = solve_mortar(K_bc, C, Z, F_bc)
 
