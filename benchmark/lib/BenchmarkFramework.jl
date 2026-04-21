@@ -344,7 +344,11 @@ Create timestamped results directory and update `current` symlink.
 Returns the path to the new directory.
 """
 function setup_output_dir(example_name::String, description::String="")
-    base = joinpath(@__DIR__, "..", "..", "results", example_name)
+    # @__DIR__ is IGAros/benchmark/lib/; three ".." up lands in the
+    # twin_mortar manuscript root so paper results live in
+    # twin_mortar/results/<example>/, not IGAros/results/ (the latter
+    # is for package-local test artifacts only — see root CLAUDE.md).
+    base = joinpath(@__DIR__, "..", "..", "..", "results", example_name)
     mkpath(base)
     stamp = Dates.format(now(), "yyyy-mm-dd")
     suffix = isempty(description) ? "" : "_" * replace(description, " " => "_")
