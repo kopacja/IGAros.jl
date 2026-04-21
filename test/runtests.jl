@@ -9,4 +9,5 @@ using Test
     include("test_geometry.jl")
     include("test_assembly.jl")
     include("test_mortar.jl")
+    include("test_run_metadata.jl")
 end

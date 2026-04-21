@@ -18,6 +18,9 @@ include("MortarGeometry.jl")
 include("MortarIntegration.jl")
 include("MortarAssembly.jl")
 include("MortarSolver.jl")
+include("RunMetadata.jl")
+
+using .RunMetadata: write_meta_toml, capture_code_provenance, capture_cluster_env
 
 export
     # BSplines
@@ -56,6 +59,8 @@ export
     # MortarAssembly
     InterfacePair, build_interface_cps, build_mortar_coupling, build_mortar_mass_matrices,
     # MortarSolver
-    solve_mortar
+    solve_mortar,
+    # RunMetadata
+    write_meta_toml, capture_code_provenance, capture_cluster_env
 
 end

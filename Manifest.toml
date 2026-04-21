@@ -2,7 +2,7 @@
 
 julia_version = "1.12.5"
 manifest_format = "2.0"
-project_hash = "79d38019bc68090a7c65d0fb6dd1e6e04cc14616"
+project_hash = "0c273aeaec9be390b2f4bbde39ce3737a7f1c94c"
 
 [[deps.AMD]]
 deps = ["LinearAlgebra", "SparseArrays", "SuiteSparse_jll"]
@@ -515,7 +515,7 @@ uuid = "34004b35-14d8-5ef3-9330-4cdb6864b03a"
 version = "0.3.28"
 
 [[deps.IGAros]]
-deps = ["Contour", "DoubleFloats", "LDLFactorizations", "LaTeXStrings", "LinearAlgebra", "PGFPlotsX", "SparseArrays", "Test"]
+deps = ["CairoMakie", "Contour", "Dates", "DoubleFloats", "LDLFactorizations", "LaTeXStrings", "LinearAlgebra", "PGFPlotsX", "SparseArrays", "TOML", "Test"]
 path = "."
 uuid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
 version = "0.1.0"
