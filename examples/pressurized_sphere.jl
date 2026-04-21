@@ -1421,3 +1421,1126 @@ function run_eps_sweep_sphere(;
         end
     end
 end
+
+# ═════════════════════════════════════════════════════════════════════════════
+# B-spline Greville interpolation helpers
+# ═════════════════════════════════════════════════════════════════════════════
+
+"""
+    _greville(kv, p, n) -> Vector{Float64}
+
+Greville abscissae for a B-spline with `n` CPs, degree `p`, knot vector `kv`
+(length n+p+1).  The i-th Greville point is the average of p consecutive knots:
+ξ̄_i = (kv[i+1] + ⋯ + kv[i+p]) / p.
+"""
+function _greville(kv::Vector{Float64}, p::Int, n::Int)
+    g = zeros(n)
+    for i in 1:n
+        g[i] = sum(kv[i+1 : i+p]) / p
+    end
+    return g
+end
+
+"""
+    _bspline_basis(xi, p, kv, n) -> Vector{Float64}
+
+Evaluate all `n` B-spline basis functions of degree `p` at parameter `xi`.
+Uses the Cox–de Boor recursion.  `kv` has length n+p+1 (1-indexed).
+"""
+function _bspline_basis(xi::Float64, p::Int, kv::Vector{Float64}, n::Int)
+    # Degree 0
+    N0 = zeros(n + p)
+    for i in 1:n+p
+        if kv[i] <= xi < kv[i+1]
+            N0[i] = 1.0
+        end
+    end
+    # Right endpoint: set last non-empty span
+    if xi >= kv[n+1]
+        for i in (n+p):-1:1
+            if kv[i] < kv[i+1]
+                N0[i] = 1.0
+                break
+            end
+        end
+    end
+
+    # Build up degree by degree
+    Nprev = N0
+    for d in 1:p
+        m = n + p - d
+        Ncurr = zeros(m)
+        for i in 1:m
+            dL = kv[i+d] - kv[i]
+            dR = kv[i+d+1] - kv[i+1]
+            Ncurr[i]  = (dL > 0 ? (xi - kv[i]) / dL * Nprev[i] : 0.0)
+            Ncurr[i] += (dR > 0 ? (kv[i+d+1] - xi) / dR * Nprev[i+1] : 0.0)
+        end
+        Nprev = Ncurr
+    end
+    return Nprev[1:n]
+end
+
+"""
+    _basis_matrix(kv, p, n) -> Matrix{Float64}
+
+Build the n×n Greville interpolation matrix N[k,i] = N_i^p(ξ̄_k).
+"""
+function _basis_matrix(kv::Vector{Float64}, p::Int, n::Int)
+    g = _greville(kv, p, n)
+    N = zeros(n, n)
+    for k in 1:n
+        N[k, :] = _bspline_basis(g[k], p, kv, n)
+    end
+    return N
+end
+
+# ═════════════════════════════════════════════════════════════════════════════
+# General-degree deltoidal parametrization (Greville interpolation)
+# ═════════════════════════════════════════════════════════════════════════════
+
+"""
+    sphere_deltoidal(p_ord, n_ang_inner, n_ang_outer, n_rad;
+                     r_i=1.0, r_c=1.2, r_o=1.4)
+        -> (B, P, p_mat, n_mat, KV, npc)
+
+Build a **6-patch** sphere octant geometry at **any polynomial degree** using the
+deltoidal icositetrahedron parametrization (Dedoncker et al. 2018).
+
+Control points are computed by **Greville interpolation** on the exact sphere:
+for each refinement level the B-spline surface passes through the sphere at the
+Greville abscissae, giving geometry error O(h^{p+1}).  This is the IGA analogue
+of placing new FEM nodes on the curved boundary at every refinement level.
+
+Shared inter-patch edges use 1D Greville interpolation to guarantee identical
+CPs between adjacent patches; interior CPs are then determined by a constrained
+tensor-product interpolation.
+
+See `sphere_deltoidal_p1` for details on patch layout, facet numbering, and
+symmetry-plane assignment.
+"""
+function sphere_deltoidal(
+    p_ord::Int, n_ang_inner::Int, n_ang_outer::Int, n_rad::Int;
+    r_i::Float64 = 1.0,
+    r_c::Float64 = 1.2,
+    r_o::Float64 = 1.4
+)
+    # ── Unit-sphere key points ───────────────────────────────────────────
+    s2 = 1 / sqrt(2.0);  s3 = 1 / sqrt(3.0)
+    a1  = [1.0, 0.0, 0.0];  a2  = [0.0, 1.0, 0.0];  a3  = [0.0, 0.0, 1.0]
+    m12 = [s2, s2, 0.0];    m13 = [s2, 0.0, s2];     m23 = [0.0, s2, s2]
+    ctr = [s3, s3, s3]
+
+    # Patch corners: (P00, P10, P11, P01)  where P_ij = P(ξ=i, η=j)
+    patch_corners = [
+        (a3,  m13, ctr, m23),   # Z
+        (a1,  m12, ctr, m13),   # X
+        (a2,  m23, ctr, m12),   # Y
+    ]
+
+    # Bilinear interpolation + projection to unit sphere
+    function _unit_dir(P00, P10, P11, P01, ξ, η)
+        v = (1-ξ)*(1-η) .* P00 .+ ξ*(1-η) .* P10 .+ ξ*η .* P11 .+ (1-ξ)*η .* P01
+        return v ./ sqrt(v[1]^2 + v[2]^2 + v[3]^2)
+    end
+
+    # ── Sphere targets along a 1D arc ────────────────────────────────────
+    function _arc_targets(Pstart, Pend, params, r)
+        T = zeros(length(params), 3)
+        for (k, t) in enumerate(params)
+            v = (1-t) .* Pstart .+ t .* Pend
+            v = v ./ sqrt(v[1]^2 + v[2]^2 + v[3]^2)
+            T[k, :] = r .* v
+        end
+        return T
+    end
+
+    # ── Sphere targets on a 2D kite patch ────────────────────────────────
+    function _surface_targets(P00, P10, P11, P01, xi_params, eta_params, r)
+        nx = length(xi_params);  ny = length(eta_params)
+        T = zeros(nx, ny, 3)
+        for l in 1:ny
+            η = eta_params[l]
+            for k in 1:nx
+                ξ = xi_params[k]
+                d = _unit_dir(P00, P10, P11, P01, ξ, η)
+                T[k, l, :] = r .* d
+            end
+        end
+        return T
+    end
+
+    # ── Build one 3-patch shell with Greville-interpolated CPs ───────────
+    function _build_shell(n_ang::Int, p::Int, r_a::Float64, r_b::Float64)
+        n_cp  = n_ang + p          # CPs per angular direction
+        n_r   = n_rad + p          # CPs in radial direction
+        kv_a  = open_uniform_kv(n_ang, p)
+        kv_r  = open_uniform_kv(n_rad, p)
+
+        # Basis matrices and Greville abscissae
+        g_a  = _greville(kv_a, p, n_cp)
+        g_r  = _greville(kv_r, p, n_r)
+        N_a  = _basis_matrix(kv_a, p, n_cp)
+        N_r  = _basis_matrix(kv_r, p, n_r)
+
+        # Radii at radial Greville points (linear blend → exact for any p)
+        radii = [r_a + g_r[k] * (r_b - r_a) for k in 1:n_r]
+
+        # ── Phase 1: 1D Greville interpolation on ALL edges ─────────────
+        # For each patch, compute the 4 edge CP arrays.
+        # Shared edges (facet 2 and 3) must use the SAME 1D CPs.
+
+        # Precompute the 3 shared-edge CP sets (one per patch pair, per radial level)
+        # Shared edge Z↔X : m13 → ctr
+        # Shared edge Z↔Y : m23 → ctr
+        # Shared edge X↔Y : m12 → ctr
+        shared_arcs = [(m13, ctr), (m23, ctr), (m12, ctr)]
+        shared_edge_cps = Vector{Matrix{Float64}}(undef, 3)  # [edge][cp_idx, (x,y,z)]
+        for (ie, (Ps, Pe)) in enumerate(shared_arcs)
+            # CPs for all radial levels stacked: (n_cp * n_r, 3)
+            edge_cp = zeros(n_cp, n_r, 3)
+            for kr in 1:n_r
+                T1d = _arc_targets(Ps, Pe, g_a, radii[kr])
+                edge_cp[:, kr, :] = N_a \ T1d
+            end
+            shared_edge_cps[ie] = reshape(edge_cp, n_cp * n_r, 3)
+        end
+
+        # Boundary edges (on symmetry planes)
+        # Patch Z: ξ=0 edge (a3→m23), η=0 edge (a3→m13)
+        # Patch X: ξ=0 edge (a1→m13), η=0 edge (a1→m12)
+        # Patch Y: ξ=0 edge (a2→m23), η=0 edge (a2→m12)
+        boundary_arcs = [
+            [(a3, m23), (a3, m13)],   # Z: ξ=0, η=0
+            [(a1, m13), (a1, m12)],   # X: ξ=0, η=0
+            [(a2, m12), (a2, m23)],   # Y: ξ=0 (a2→m12), η=0 (a2→m23)
+        ]
+        # shared edge assignment: [patch] → (ξ=1 edge idx, η=1 edge idx)
+        # Z: ξ=1 → shared[1] (m13→c), η=1 → shared[2] (m23→c)
+        # X: ξ=1 → shared[3] (m12→c), η=1 → shared[1] (m13→c)
+        # Y: ξ=1 → shared[2] (m23→c), η=1 → shared[3] (m12→c)
+        shared_assign = [(1, 2), (3, 1), (2, 3)]
+
+        # ── Phase 2: Per-patch surface interpolation ─────────────────────
+        # For each patch and each radial level, solve a constrained 2D
+        # interpolation: edge CPs fixed from Phase 1, interior CPs free.
+
+        local_cps = Vector{Array{Float64,4}}(undef, 3)  # [patch][i,j,kr,xyz]
+
+        for (ip, (P00, P10, P11, P01)) in enumerate(patch_corners)
+            CPs = zeros(n_cp, n_cp, n_r, 3)
+
+            # Fixed edge CPs (precompute for all radial levels)
+            bnd_arcs = boundary_arcs[ip]
+            se = shared_assign[ip]
+
+            for kr in 1:n_r
+                r = radii[kr]
+
+                # Edge CPs via 1D interpolation
+                # ξ=0 (i=1): arc bnd_arcs[1]
+                T_xi0 = _arc_targets(bnd_arcs[1][1], bnd_arcs[1][2], g_a, r)
+                cp_xi0 = N_a \ T_xi0   # (n_cp, 3)
+
+                # η=0 (j=1): arc bnd_arcs[2]
+                T_eta0 = _arc_targets(bnd_arcs[2][1], bnd_arcs[2][2], g_a, r)
+                cp_eta0 = N_a \ T_eta0  # (n_cp, 3)
+
+                # ξ=1 (i=n_cp): shared edge se[1]
+                se_cps_xi1 = reshape(shared_edge_cps[se[1]], n_cp, n_r, 3)
+                cp_xi1 = se_cps_xi1[:, kr, :]  # (n_cp, 3)
+
+                # η=1 (j=n_cp): shared edge se[2]
+                se_cps_eta1 = reshape(shared_edge_cps[se[2]], n_cp, n_r, 3)
+                cp_eta1 = se_cps_eta1[:, kr, :]  # (n_cp, 3)
+
+                # Fill edge CPs into the full array
+                CPs[1,     :, kr, :] = cp_xi0    # ξ=0 (i=1)
+                CPs[n_cp,  :, kr, :] = cp_xi1    # ξ=1 (i=n_cp)
+                CPs[:,     1, kr, :] = cp_eta0   # η=0 (j=1)
+                CPs[:, n_cp,  kr, :] = cp_eta1   # η=1 (j=n_cp)
+
+                # Interior CPs: constrained interpolation
+                if n_cp > 2
+                    ni = n_cp - 2  # interior count
+                    N_int = N_a[2:n_cp-1, 2:n_cp-1]  # interior sub-matrix
+
+                    # 2D target at interior Greville points
+                    g_int = g_a[2:n_cp-1]
+                    T2d = _surface_targets(P00, P10, P11, P01, g_int, g_int, r)
+
+                    # Subtract boundary contributions
+                    for d in 1:3
+                        for li in 1:ni
+                            l = li + 1  # global η index
+                            for ki in 1:ni
+                                k = ki + 1  # global ξ index
+                                bc = 0.0
+                                # ξ=0 edge (i=1)
+                                bc += N_a[k, 1] * N_a[l, :] ⋅ CPs[1, :, kr, d]
+                                # ξ=1 edge (i=n_cp)
+                                bc += N_a[k, n_cp] * N_a[l, :] ⋅ CPs[n_cp, :, kr, d]
+                                # η=0 edge (j=1), interior ξ only
+                                for ii in 2:n_cp-1
+                                    bc += N_a[k, ii] * N_a[l, 1] * CPs[ii, 1, kr, d]
+                                end
+                                # η=1 edge (j=n_cp), interior ξ only
+                                for ii in 2:n_cp-1
+                                    bc += N_a[k, ii] * N_a[l, n_cp] * CPs[ii, n_cp, kr, d]
+                                end
+                                T2d[ki, li, d] -= bc
+                            end
+                        end
+                        # Solve: N_int * P_int * N_int^T = RHS
+                        CPs[2:n_cp-1, 2:n_cp-1, kr, d] = N_int \ (T2d[:, :, d] / N_int')
+                    end
+                end
+            end
+            local_cps[ip] = CPs
+        end
+
+        # ── Merge shared CPs (same as p=1) ──────────────────────────────
+        gid = [zeros(Int, n_cp, n_cp, n_r) for _ in 1:3]
+        nxt = Ref(0)
+        newcp() = (nxt[] += 1; nxt[])
+
+        for k in 1:n_r, j in 1:n_cp, i in 1:n_cp
+            gid[1][i, j, k] = newcp()
+        end
+        for k in 1:n_r, j in 1:n_cp, i in 1:n_cp
+            if j == n_cp
+                gid[2][i, j, k] = gid[1][n_cp, i, k]
+            else
+                gid[2][i, j, k] = newcp()
+            end
+        end
+        for k in 1:n_r, j in 1:n_cp, i in 1:n_cp
+            if i == n_cp && j == n_cp
+                gid[3][i, j, k] = gid[1][n_cp, n_cp, k]
+            elseif i == n_cp
+                gid[3][i, j, k] = gid[1][j, n_cp, k]
+            elseif j == n_cp
+                gid[3][i, j, k] = gid[2][n_cp, i, k]
+            else
+                gid[3][i, j, k] = newcp()
+            end
+        end
+
+        total = nxt[]
+        B = zeros(total, 4)
+        P_shell = [Int[] for _ in 1:3]
+        for ip in 1:3
+            for k in 1:n_r, j in 1:n_cp, i in 1:n_cp
+                g = gid[ip][i, j, k]
+                B[g, 1:3] .= local_cps[ip][i, j, k, :]
+                B[g, 4] = 1.0   # non-rational (weights = 1)
+                push!(P_shell[ip], g)
+            end
+        end
+        return B, P_shell, total, kv_a, kv_r, n_cp, n_r
+    end
+
+    # ── Assemble inner and outer shells ──────────────────────────────────
+    B_in,  P_in,  ncp_in,  kv_ai, kv_ri, n_cp_i, n_r =
+        _build_shell(n_ang_inner, p_ord, r_i, r_c)
+    B_out, P_out, ncp_out, kv_ao, kv_ro, n_cp_o, _ =
+        _build_shell(n_ang_outer, p_ord, r_c, r_o)
+
+    B   = vcat(B_in, B_out)
+    npc = 6
+    P   = Vector{Vector{Int}}(undef, npc)
+    for ip in 1:3
+        P[ip]     = P_in[ip]
+        P[ip + 3] = P_out[ip] .+ ncp_in
+    end
+
+    p_mat = fill(p_ord, npc, 3)
+    n_mat = [n_cp_i n_cp_i n_r;
+             n_cp_i n_cp_i n_r;
+             n_cp_i n_cp_i n_r;
+             n_cp_o n_cp_o n_r;
+             n_cp_o n_cp_o n_r;
+             n_cp_o n_cp_o n_r]
+
+    kv_rad = open_uniform_kv(n_rad, p_ord)
+    KV = Vector{Vector{Vector{Float64}}}([
+        [kv_ai, kv_ai, kv_ri],
+        [kv_ai, kv_ai, kv_ri],
+        [kv_ai, kv_ai, kv_ri],
+        [kv_ao, kv_ao, kv_ro],
+        [kv_ao, kv_ao, kv_ro],
+        [kv_ao, kv_ao, kv_ro],
+    ])
+
+    return B, P, p_mat, n_mat, KV, npc
+end
+
+# ─────────────────────── General-degree deltoidal solver ─────────────────────
+
+"""
+    solve_sphere_deltoidal(p_ord, exp_level; ...) -> NamedTuple
+
+Pressurized-sphere benchmark using the deltoidal icositetrahedron
+parametrization with Greville-interpolated geometry at **any degree p**.
+
+Mesh sizes at refinement level `exp_level`:
+  n_ang_outer = 2 · 2^exp
+  n_ang_inner = 3 · 2^exp   (non-conforming 3:2 ratio)
+  n_rad       = 1 · 2^exp
+"""
+function solve_sphere_deltoidal(
+    p_ord::Int,
+    exp_level::Int;
+    r_i::Float64                     = 1.0,
+    r_c::Float64                     = 1.2,
+    r_o::Float64                     = 1.4,
+    E::Float64                       = 1.0,
+    nu::Float64                      = 0.3,
+    p_i::Float64                     = 0.01,
+    epss::Float64                    = 0.0,
+    NQUAD::Int                       = p_ord + 1,
+    NQUAD_mortar::Int                = p_ord + 2,
+    strategy::IntegrationStrategy    = ElementBasedIntegration(),
+    formulation::FormulationStrategy = TwinMortarFormulation(),
+    n_ang_outer_base::Int            = 2,   # outer elems per dir at exp=0
+    n_ang_inner_base::Int            = 3,   # inner elems per dir at exp=0
+    n_rad_base::Int                  = 1,   # radial elems at exp=0
+)
+    nsd = 3;  npd = 3;  ned = 3
+
+    n_ang_outer = n_ang_outer_base * 2^exp_level
+    n_ang_inner = n_ang_inner_base * 2^exp_level
+    n_rad       = n_rad_base * 2^exp_level
+
+    # ── Geometry ─────────────────────────────────────────────────────────
+    B_ref, P_ref, p_mat, n_mat_ref, KV_ref, npc =
+        sphere_deltoidal(p_ord, n_ang_inner, n_ang_outer, n_rad;
+                         r_i=r_i, r_c=r_c, r_o=r_o)
+    ncp = size(B_ref, 1)
+    epss_use = epss > 0.0 ? epss : (p_ord == 1 ? 1e4 : 100.0)
+
+    # ── Connectivity ─────────────────────────────────────────────────────
+    nel, nnp, nen = patch_metrics(npc, npd, p_mat, n_mat_ref)
+    IEN = build_ien(nsd, npd, npc, p_mat, n_mat_ref, nel, nnp, nen)
+    INC = [build_inc(n_mat_ref[pc, :]) for pc in 1:npc]
+
+    # ── Dirichlet BCs (same layout as p=1 deltoidal) ────────────────────
+    dBC = [1  4  2  1  4;
+           1  5  2  3  6;
+           2  5  2  1  4;
+           2  4  2  2  5;
+           3  5  2  2  5;
+           3  4  2  3  6]
+    bc_per_dof = dirichlet_bc_control_points(p_mat, n_mat_ref, KV_ref, P_ref,
+                                              npd, nnp, ned, dBC)
+    neq, ID = build_id(bc_per_dof, ned, ncp)
+    LM      = build_lm(nen, ned, npc, nel, ID, IEN, P_ref)
+
+    # ── Stiffness ────────────────────────────────────────────────────────
+    mats = [LinearElastic(E, nu, :three_d) for _ in 1:npc]
+    Ub0  = zeros(ncp, nsd)
+    K, _ = build_stiffness_matrix(npc, nsd, npd, ned, neq,
+                                   p_mat, n_mat_ref, KV_ref, P_ref, B_ref, Ub0,
+                                   nen, nel, IEN, INC, LM, mats, NQUAD, 1.0)
+
+    # ── Pressure on inner surface (facet 1) of patches 1–3 ──────────────
+    stress_fn = (x, y, z) -> lame_stress_sphere(x, y, z; p_i=p_i, r_i=r_i, r_o=r_o)
+    F = zeros(neq)
+    for pc in 1:3
+        F = segment_load(n_mat_ref[pc,:], p_mat[pc,:], KV_ref[pc], P_ref[pc], B_ref,
+                         nnp[pc], nen[pc], nsd, npd, ned,
+                         Int[], 1, ID, F, stress_fn, 1.0, NQUAD)
+    end
+    K_bc, F_bc = enforce_dirichlet(Tuple{Int,Float64}[], K, F)
+
+    # ── Mortar coupling at r = r_c ───────────────────────────────────────
+    if formulation isa SinglePassFormulation
+        pairs = [InterfacePair(1, 6, 4, 1),
+                 InterfacePair(2, 6, 5, 1),
+                 InterfacePair(3, 6, 6, 1)]
+    else
+        pairs = [InterfacePair(1, 6, 4, 1), InterfacePair(4, 1, 1, 6),
+                 InterfacePair(2, 6, 5, 1), InterfacePair(5, 1, 2, 6),
+                 InterfacePair(3, 6, 6, 1), InterfacePair(6, 1, 3, 6)]
+    end
+    Pc = build_interface_cps(pairs, p_mat, n_mat_ref, KV_ref, P_ref, npd, nnp,
+                              formulation)
+    C, Z = build_mortar_coupling(Pc, pairs, p_mat, n_mat_ref, KV_ref, P_ref, B_ref,
+                                  ID, nnp, ned, nsd, npd, neq, NQUAD_mortar, epss_use,
+                                  strategy, formulation)
+
+    # ── Solve ─────────────────────────────────────────────────────────────
+    U, _ = solve_mortar(K_bc, C, Z, F_bc)
+
+    # ── Errors ────────────────────────────────────────────────────────────
+    σ_abs, σ_ref = l2_stress_error_sphere(
+        U, ID, npc, nsd, npd, p_mat, n_mat_ref, KV_ref, P_ref, B_ref,
+        nen, nel, IEN, INC, mats, NQUAD, stress_fn)
+
+    disp_fn = (x, y, z) -> lame_displacement_sphere(x, y, z;
+        p_i=p_i, r_i=r_i, r_o=r_o, E=E, nu=nu)
+    l2_abs, l2_ref = l2_disp_error_sphere(
+        U, ID, npc, nsd, npd, p_mat, n_mat_ref, KV_ref, P_ref, B_ref,
+        nen, nel, IEN, INC, NQUAD, disp_fn)
+
+    en_abs, en_ref = energy_error_sphere(
+        U, ID, npc, nsd, npd, p_mat, n_mat_ref, KV_ref, P_ref, B_ref,
+        nen, nel, IEN, INC, mats, NQUAD, stress_fn)
+
+    return (σ_rel=σ_abs/σ_ref, σ_abs=σ_abs,
+            l2_rel=l2_abs/l2_ref, l2_abs=l2_abs,
+            en_rel=en_abs/en_ref, en_abs=en_abs)
+end
+
+"""
+    run_convergence_sphere_deltoidal(; degrees, exp_range, kwargs...)
+
+Convergence table for the deltoidal sphere at any degree.
+"""
+function run_convergence_sphere_deltoidal(;
+    degrees::Vector{Int}     = [1, 2, 3],
+    exp_range::UnitRange{Int} = 0:3,
+    kwargs...
+)
+    for p in degrees
+        @printf("\n─── p = %d  deltoidal (Greville interpolation) ───────────────────────────────────────\n", p)
+        @printf("  %5s  %12s  %6s  %12s  %6s  %12s  %6s  %8s\n",
+                "exp", "||e||_disp", "rate", "||e||_energy", "rate", "||e||_σ", "rate", "h")
+        prev_d = prev_e = prev_s = NaN
+        for e in exp_range
+            h = 1.0 / (2 * 2^e)
+            try
+                r = solve_sphere_deltoidal(p, e; kwargs...)
+                rd = isnan(prev_d) ? NaN : log(prev_d / r.l2_abs)  / log(2.0)
+                re = isnan(prev_e) ? NaN : log(prev_e / r.en_abs)  / log(2.0)
+                rs = isnan(prev_s) ? NaN : log(prev_s / r.σ_abs)   / log(2.0)
+                @printf("  %5d  %12.4e  %6.2f  %12.4e  %6.2f  %12.4e  %6.2f  %8.4f\n",
+                        e, r.l2_abs, rd, r.en_abs, re, r.σ_abs, rs, h)
+                prev_d = r.l2_abs;  prev_e = r.en_abs;  prev_s = r.σ_abs
+            catch ex
+                @printf("  %5d  ERROR: %s\n", e, string(ex)[1:min(80, end)])
+                prev_d = prev_e = prev_s = NaN
+            end
+        end
+    end
+end
+
+# ═════════════════════════════════════════════════════════════════════════════
+# p=1 deltoidal (original direct-placement version, kept for reference)
+# ═════════════════════════════════════════════════════════════════════════════
+
+"""
+    sphere_deltoidal_p1(n_ang_inner, n_ang_outer, n_rad;
+                        r_i=1.0, r_c=1.2, r_o=1.4)
+        -> (B, P, p_mat, n_mat, KV, npc)
+
+Build a **6-patch trilinear** (p=1) sphere octant geometry using the deltoidal
+icositetrahedron parametrization (Dedoncker et al. 2018).  Each spherical shell
+(inner r_i→r_c, outer r_c→r_o) is tiled by three "kite"-shaped patches that
+meet at the octant centre point (1/√3, 1/√3, 1/√3).
+
+Control points are placed directly on the sphere surface (constant radius per
+radial level) via bilinear interpolation of the four kite corners followed by
+radial projection.  Adjacent patches within a shell share control-point indices
+for C⁰ continuity.
+
+Patch numbering:
+  1 = Z_inner, 2 = X_inner, 3 = Y_inner,
+  4 = Z_outer, 5 = X_outer, 6 = Y_outer
+
+Facet layout per patch (3D IGAros convention):
+  Facet 1  (ζ=1):   inner radial surface (r_a)
+  Facet 6  (ζ=n₃):  outer radial surface (r_b) / mortar interface
+  Facet 4  (ξ=1):   symmetry-plane edge  (axis point → edge midpoint)
+  Facet 2  (ξ=n₁):  inter-patch edge     (edge midpoint → octant centre)
+  Facet 5  (η=1):   symmetry-plane edge  (axis point → edge midpoint)
+  Facet 3  (η=n₂):  inter-patch edge     (edge midpoint → octant centre)
+
+Patch corner assignment (ξ=0 η=0, ξ=1 η=0, ξ=1 η=1, ξ=0 η=1):
+  Z: (a3, m13, c, m23)  — facet 4 on yz-plane (x=0), facet 5 on xz-plane (y=0)
+  X: (a1, m12, c, m13)  — facet 4 on xz-plane (y=0), facet 5 on xy-plane (z=0)
+  Y: (a2, m23, c, m12)  — facet 4 on xy-plane (z=0), facet 5 on yz-plane (x=0)
+
+Shared inter-patch edges:
+  Z facet 2 (i=n_a) ↔ X facet 3 (j=n_a):  m13 → c
+  Z facet 3 (j=n_a) ↔ Y facet 2 (i=n_a):  m23 → c
+  X facet 2 (i=n_a) ↔ Y facet 3 (j=n_a):  m12 → c
+"""
+function sphere_deltoidal_p1(
+    n_ang_inner::Int, n_ang_outer::Int, n_rad::Int;
+    r_i::Float64 = 1.0,
+    r_c::Float64 = 1.2,
+    r_o::Float64 = 1.4
+)
+    # ── Unit-sphere key points ───────────────────────────────────────────
+    s2 = 1 / sqrt(2.0);  s3 = 1 / sqrt(3.0)
+    a1  = [1.0, 0.0, 0.0];  a2  = [0.0, 1.0, 0.0];  a3  = [0.0, 0.0, 1.0]
+    m12 = [s2, s2, 0.0];    m13 = [s2, 0.0, s2];     m23 = [0.0, s2, s2]
+    ctr = [s3, s3, s3]
+
+    # Patch corners: (P00, P10, P11, P01)  with P_ij = P(ξ=i, η=j)
+    patch_corners = [
+        (a3,  m13, ctr, m23),   # Z: z-axis neighbourhood
+        (a1,  m12, ctr, m13),   # X: x-axis neighbourhood
+        (a2,  m23, ctr, m12),   # Y: y-axis neighbourhood
+    ]
+
+    # Bilinear interpolation + projection to unit sphere
+    function _unit_dir(P00, P10, P11, P01, ξ, η)
+        v = (1-ξ)*(1-η) .* P00 .+ ξ*(1-η) .* P10 .+ ξ*η .* P11 .+ (1-ξ)*η .* P01
+        return v ./ sqrt(v[1]^2 + v[2]^2 + v[3]^2)
+    end
+
+    # ── Build one 3-patch shell with merged CPs ─────────────────────────
+    function _build_shell(n_ang::Int, r_a::Float64, r_b::Float64)
+        n_a = n_ang + 1   # CPs per angular direction
+        n_r = n_rad + 1   # CPs in radial direction
+
+        # 1) Compute local xyz for each of the 3 patches
+        local_xyz = Vector{Array{Float64,4}}(undef, 3)
+        for (ip, (P00, P10, P11, P01)) in enumerate(patch_corners)
+            cps = zeros(n_a, n_a, n_r, 3)
+            for k in 1:n_r
+                r = r_a + (k - 1) / n_rad * (r_b - r_a)
+                for j in 1:n_a
+                    η = (j - 1) / (n_a - 1)
+                    for i in 1:n_a
+                        ξ = (i - 1) / (n_a - 1)
+                        d = _unit_dir(P00, P10, P11, P01, ξ, η)
+                        cps[i, j, k, :] .= r .* d
+                    end
+                end
+            end
+            local_xyz[ip] = cps
+        end
+
+        # 2) Global CP index assignment with sharing on inter-patch edges
+        gid = [zeros(Int, n_a, n_a, n_r) for _ in 1:3]
+        nxt = Ref(0)
+        newcp() = (nxt[] += 1; nxt[])
+
+        # Patch Z (index 1): all new
+        for k in 1:n_r, j in 1:n_a, i in 1:n_a
+            gid[1][i, j, k] = newcp()
+        end
+
+        # Patch X (index 2): facet 3 (j=n_a) shared with Z facet 2 (i=n_a)
+        #   X(i_X, n_a, k) ↔ Z(n_a, i_X, k)
+        for k in 1:n_r, j in 1:n_a, i in 1:n_a
+            if j == n_a
+                gid[2][i, j, k] = gid[1][n_a, i, k]
+            else
+                gid[2][i, j, k] = newcp()
+            end
+        end
+
+        # Patch Y (index 3):
+        #   facet 2 (i=n_a) shared with Z facet 3 (j=n_a):  Y(n_a,j,k) ↔ Z(j,n_a,k)
+        #   facet 3 (j=n_a) shared with X facet 2 (i=n_a):  Y(i,n_a,k) ↔ X(n_a,i,k)
+        #   corner  (n_a,n_a,k): octant centre, shared by all three
+        for k in 1:n_r, j in 1:n_a, i in 1:n_a
+            if i == n_a && j == n_a           # octant centre (all 3 patches)
+                gid[3][i, j, k] = gid[1][n_a, n_a, k]
+            elseif i == n_a                   # edge shared with Z
+                gid[3][i, j, k] = gid[1][j, n_a, k]
+            elseif j == n_a                   # edge shared with X
+                gid[3][i, j, k] = gid[2][n_a, i, k]
+            else
+                gid[3][i, j, k] = newcp()
+            end
+        end
+
+        # 3) Assemble global B and P arrays
+        total = nxt[]
+        B = zeros(total, 4)
+        P_shell = [Int[] for _ in 1:3]
+        for ip in 1:3
+            for k in 1:n_r, j in 1:n_a, i in 1:n_a
+                g = gid[ip][i, j, k]
+                B[g, 1:3] .= local_xyz[ip][i, j, k, :]
+                B[g, 4] = 1.0
+                push!(P_shell[ip], g)
+            end
+        end
+        return B, P_shell, total
+    end
+
+    # ── Assemble inner and outer shells ──────────────────────────────────
+    B_in,  P_in,  ncp_in  = _build_shell(n_ang_inner, r_i, r_c)
+    B_out, P_out, ncp_out = _build_shell(n_ang_outer, r_c, r_o)
+
+    B   = vcat(B_in, B_out)
+    npc = 6
+    P   = Vector{Vector{Int}}(undef, npc)
+    for ip in 1:3
+        P[ip]     = P_in[ip]
+        P[ip + 3] = P_out[ip] .+ ncp_in
+    end
+
+    p_mat = fill(1, npc, 3)
+    n_ai = n_ang_inner + 1;  n_ao = n_ang_outer + 1;  n_r = n_rad + 1
+    n_mat = [n_ai n_ai n_r;
+             n_ai n_ai n_r;
+             n_ai n_ai n_r;
+             n_ao n_ao n_r;
+             n_ao n_ao n_r;
+             n_ao n_ao n_r]
+
+    kv_ai  = open_uniform_kv(n_ang_inner, 1)
+    kv_ao  = open_uniform_kv(n_ang_outer, 1)
+    kv_rad = open_uniform_kv(n_rad, 1)
+    KV = Vector{Vector{Vector{Float64}}}([
+        [kv_ai, kv_ai, kv_rad],
+        [kv_ai, kv_ai, kv_rad],
+        [kv_ai, kv_ai, kv_rad],
+        [kv_ao, kv_ao, kv_rad],
+        [kv_ao, kv_ao, kv_rad],
+        [kv_ao, kv_ao, kv_rad],
+    ])
+
+    return B, P, p_mat, n_mat, KV, npc
+end
+
+# ─────────────────────── Deltoidal p=1 solver ────────────────────────────────
+
+"""
+    solve_sphere_deltoidal_p1(exp_level; ...) -> NamedTuple
+
+Pressurized-sphere benchmark with **p=1 trilinear** elements on the deltoidal
+icositetrahedron parametrization (3 patches per shell, 6 total).
+
+Mesh sizes at refinement level `exp_level`:
+  n_ang_outer = 2 · 2^exp   (2 at exp=0)
+  n_ang_inner = 3 · 2^exp   (3 at exp=0, non-conforming 3:2 ratio)
+  n_rad       = 1 · 2^exp   (1 at exp=0)
+"""
+function solve_sphere_deltoidal_p1(
+    exp_level::Int;
+    r_i::Float64                     = 1.0,
+    r_c::Float64                     = 1.2,
+    r_o::Float64                     = 1.4,
+    E::Float64                       = 1.0,
+    nu::Float64                      = 0.3,
+    p_i::Float64                     = 0.01,
+    epss::Float64                    = 0.0,
+    NQUAD::Int                       = 2,
+    NQUAD_mortar::Int                = 3,
+    strategy::IntegrationStrategy    = ElementBasedIntegration(),
+    formulation::FormulationStrategy = TwinMortarFormulation(),
+    vtk_prefix::String               = "",
+    n_vis::Int                       = 4
+)
+    nsd = 3;  npd = 3;  ned = 3
+
+    n_ang_outer = 2 * 2^exp_level
+    n_ang_inner = 3 * 2^exp_level
+    n_rad       = 1 * 2^exp_level
+
+    # ── Geometry ─────────────────────────────────────────────────────────
+    B_ref, P_ref, p_mat, n_mat_ref, KV_ref, npc =
+        sphere_deltoidal_p1(n_ang_inner, n_ang_outer, n_rad;
+                            r_i=r_i, r_c=r_c, r_o=r_o)
+    ncp = size(B_ref, 1)
+    epss_use = epss > 0.0 ? epss : 100.0
+
+    # ── Connectivity ─────────────────────────────────────────────────────
+    nel, nnp, nen = patch_metrics(npc, npd, p_mat, n_mat_ref)
+    IEN = build_ien(nsd, npd, npc, p_mat, n_mat_ref, nel, nnp, nen)
+    INC = [build_inc(n_mat_ref[pc, :]) for pc in 1:npc]
+
+    # ── Dirichlet BCs (symmetry planes) ──────────────────────────────────
+    # Patches: 1=Z_in, 2=X_in, 3=Y_in, 4=Z_out, 5=X_out, 6=Y_out
+    #
+    # ux=0 on yz-plane (x=0):  Patch Z facet 4 (a3→m23), Patch Y facet 5 (a2→m23)
+    # uy=0 on xz-plane (y=0):  Patch Z facet 5 (a3→m13), Patch X facet 4 (a1→m13)
+    # uz=0 on xy-plane (z=0):  Patch X facet 5 (a1→m12), Patch Y facet 4 (a2→m12)
+    dBC = [1  4  2  1  4;    # ux=0 on Patch Z facet 4
+           1  5  2  3  6;    # ux=0 on Patch Y facet 5
+           2  5  2  1  4;    # uy=0 on Patch Z facet 5
+           2  4  2  2  5;    # uy=0 on Patch X facet 4
+           3  5  2  2  5;    # uz=0 on Patch X facet 5
+           3  4  2  3  6]    # uz=0 on Patch Y facet 4
+    bc_per_dof = dirichlet_bc_control_points(p_mat, n_mat_ref, KV_ref, P_ref,
+                                              npd, nnp, ned, dBC)
+    neq, ID = build_id(bc_per_dof, ned, ncp)
+    LM      = build_lm(nen, ned, npc, nel, ID, IEN, P_ref)
+
+    # ── Stiffness ────────────────────────────────────────────────────────
+    mats = [LinearElastic(E, nu, :three_d) for _ in 1:npc]
+    Ub0  = zeros(ncp, nsd)
+    K, _ = build_stiffness_matrix(npc, nsd, npd, ned, neq,
+                                   p_mat, n_mat_ref, KV_ref, P_ref, B_ref, Ub0,
+                                   nen, nel, IEN, INC, LM, mats, NQUAD, 1.0)
+
+    # ── Pressure on inner surface (facet 1, ζ=1, r=r_i) of patches 1–3 ─
+    stress_fn = (x, y, z) -> lame_stress_sphere(x, y, z; p_i=p_i, r_i=r_i, r_o=r_o)
+    F = zeros(neq)
+    for pc in 1:3
+        F = segment_load(n_mat_ref[pc,:], p_mat[pc,:], KV_ref[pc], P_ref[pc], B_ref,
+                         nnp[pc], nen[pc], nsd, npd, ned,
+                         Int[], 1, ID, F, stress_fn, 1.0, NQUAD)
+    end
+
+    K_bc, F_bc = enforce_dirichlet(Tuple{Int,Float64}[], K, F)
+
+    # ── Mortar coupling at r = r_c ───────────────────────────────────────
+    # Inner shell facet 6 (ζ=n₃) ↔ Outer shell facet 1 (ζ=1)
+    if formulation isa SinglePassFormulation
+        pairs = [InterfacePair(1, 6, 4, 1),
+                 InterfacePair(2, 6, 5, 1),
+                 InterfacePair(3, 6, 6, 1)]
+    else
+        pairs = [InterfacePair(1, 6, 4, 1), InterfacePair(4, 1, 1, 6),
+                 InterfacePair(2, 6, 5, 1), InterfacePair(5, 1, 2, 6),
+                 InterfacePair(3, 6, 6, 1), InterfacePair(6, 1, 3, 6)]
+    end
+    Pc = build_interface_cps(pairs, p_mat, n_mat_ref, KV_ref, P_ref, npd, nnp,
+                              formulation)
+    C, Z = build_mortar_coupling(Pc, pairs, p_mat, n_mat_ref, KV_ref, P_ref, B_ref,
+                                  ID, nnp, ned, nsd, npd, neq, NQUAD_mortar, epss_use,
+                                  strategy, formulation)
+
+    # ── Solve ─────────────────────────────────────────────────────────────
+    U, _ = solve_mortar(K_bc, C, Z, F_bc)
+
+    # ── Errors ────────────────────────────────────────────────────────────
+    σ_abs, σ_ref = l2_stress_error_sphere(
+        U, ID, npc, nsd, npd, p_mat, n_mat_ref, KV_ref, P_ref, B_ref,
+        nen, nel, IEN, INC, mats, NQUAD, stress_fn)
+
+    disp_fn = (x, y, z) -> lame_displacement_sphere(x, y, z;
+        p_i=p_i, r_i=r_i, r_o=r_o, E=E, nu=nu)
+    l2_abs, l2_ref = l2_disp_error_sphere(
+        U, ID, npc, nsd, npd, p_mat, n_mat_ref, KV_ref, P_ref, B_ref,
+        nen, nel, IEN, INC, NQUAD, disp_fn)
+
+    en_abs, en_ref = energy_error_sphere(
+        U, ID, npc, nsd, npd, p_mat, n_mat_ref, KV_ref, P_ref, B_ref,
+        nen, nel, IEN, INC, mats, NQUAD, stress_fn)
+
+    return (σ_rel=σ_abs/σ_ref, σ_abs=σ_abs,
+            l2_rel=l2_abs/l2_ref, l2_abs=l2_abs,
+            en_rel=en_abs/en_ref, en_abs=en_abs)
+end
+
+# ─────────────────────── Deltoidal convergence table ─────────────────────────
+
+"""
+    run_convergence_sphere_deltoidal_p1(; exp_range=0:4, kwargs...)
+
+Convergence table for the deltoidal p=1 pressurised sphere.
+"""
+function run_convergence_sphere_deltoidal_p1(;
+    exp_range::UnitRange{Int} = 0:4,
+    kwargs...
+)
+    @printf("\n─── p = 1  deltoidal (3 patches/shell) ──────────────────────────────────────────────\n")
+    @printf("  %5s  %12s  %6s  %12s  %6s  %12s  %6s  %8s\n",
+            "exp", "||e||_disp", "rate", "||e||_energy", "rate", "||e||_σ", "rate", "h")
+    prev_d = prev_e = prev_s = NaN
+    for e in exp_range
+        h = 1.0 / (2 * 2^e)
+        try
+            r = solve_sphere_deltoidal_p1(e; kwargs...)
+            rd = isnan(prev_d) ? NaN : log(prev_d / r.l2_abs)  / log(2.0)
+            re = isnan(prev_e) ? NaN : log(prev_e / r.en_abs)  / log(2.0)
+            rs = isnan(prev_s) ? NaN : log(prev_s / r.σ_abs)   / log(2.0)
+            @printf("  %5d  %12.4e  %6.2f  %12.4e  %6.2f  %12.4e  %6.2f  %8.4f\n",
+                    e, r.l2_abs, rd, r.en_abs, re, r.σ_abs, rs, h)
+            prev_d = r.l2_abs;  prev_e = r.en_abs;  prev_s = r.σ_abs
+        catch ex
+            @printf("  %5d  ERROR: %s\n", e, string(ex)[1:min(60, end)])
+            prev_d = prev_e = prev_s = NaN
+        end
+    end
+end
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Deltoidal sphere: setup helper + cost study
+# ═════════════════════════════════════════════════════════════════════════════
+
+"""
+    _sphere_deltoidal_setup(p_ord, exp_level; kwargs...) -> NamedTuple
+
+Build the deltoidal sphere mesh (without solving) and return everything
+needed for `build_mortar_coupling`.  Used by `run_cost_study_sphere_deltoidal`.
+"""
+function _sphere_deltoidal_setup(
+    p_ord::Int, exp_level::Int;
+    r_i::Float64 = 1.0, r_c::Float64 = 1.2, r_o::Float64 = 1.4,
+    E::Float64 = 1.0, nu::Float64 = 0.3,
+    epss::Float64 = 1e4,
+    NQUAD_mortar::Int = p_ord + 2,
+    n_ang_outer_base::Int = (p_ord <= 2 ? 2 : 1),
+    n_ang_inner_base::Int = (p_ord <= 2 ? 3 : 2),
+    n_rad_base::Int       = 1,
+)
+    nsd = 3;  npd = 3;  ned = 3
+
+    n_ang_outer = n_ang_outer_base * 2^exp_level
+    n_ang_inner = n_ang_inner_base * 2^exp_level
+    n_rad       = n_rad_base * 2^exp_level
+
+    B_ref, P_ref, p_mat, n_mat_ref, KV_ref, npc =
+        sphere_deltoidal(p_ord, n_ang_inner, n_ang_outer, n_rad;
+                         r_i=r_i, r_c=r_c, r_o=r_o)
+    ncp = size(B_ref, 1)
+
+    nel, nnp, nen = patch_metrics(npc, npd, p_mat, n_mat_ref)
+    IEN = build_ien(nsd, npd, npc, p_mat, n_mat_ref, nel, nnp, nen)
+
+    dBC = [1  4  2  1  4;
+           1  5  2  3  6;
+           2  5  2  1  4;
+           2  4  2  2  5;
+           3  5  2  2  5;
+           3  4  2  3  6]
+    bc_per_dof = dirichlet_bc_control_points(p_mat, n_mat_ref, KV_ref, P_ref,
+                                              npd, nnp, ned, dBC)
+    neq, ID = build_id(bc_per_dof, ned, ncp)
+
+    # Twin Mortar pairs (both half-passes)
+    pairs_tm = [InterfacePair(1, 6, 4, 1), InterfacePair(4, 1, 1, 6),
+                InterfacePair(2, 6, 5, 1), InterfacePair(5, 1, 2, 6),
+                InterfacePair(3, 6, 6, 1), InterfacePair(6, 1, 3, 6)]
+    # Single-pass pairs (inner→outer only)
+    pairs_sp = [InterfacePair(1, 6, 4, 1),
+                InterfacePair(2, 6, 5, 1),
+                InterfacePair(3, 6, 6, 1)]
+
+    # Interface element count (slave side = inner patches, facet 6)
+    n_iface_slave = sum(
+        (n_mat_ref[pc, 1] - p_ord) * (n_mat_ref[pc, 2] - p_ord) for pc in 1:3)
+
+    return (
+        p_mat=p_mat, n_mat_ref=n_mat_ref, KV_ref=KV_ref, P_ref=P_ref, B_ref=B_ref,
+        ID=ID, nnp=nnp, ned=ned, nsd=nsd, npd=npd, neq=neq, ncp=ncp,
+        NQUAD_mortar=NQUAD_mortar, epss=epss,
+        pairs_tm=pairs_tm, pairs_sp=pairs_sp,
+        n_iface_slave=n_iface_slave,
+    )
+end
+
+"""
+    run_cost_study_sphere_deltoidal(; degrees, exp_levels, n_repeats, epss)
+
+Time `build_mortar_coupling` for TM, SPMS, and DPM on the deltoidal sphere.
+"""
+function run_cost_study_sphere_deltoidal(;
+    degrees::Vector{Int}    = [1, 2, 3, 4],
+    exp_levels::Vector{Int} = [2],
+    n_repeats::Int          = 5,
+    epss::Float64           = 1e4,
+    kwargs...
+)
+    configs = [
+        ("TM",   TwinMortarFormulation(),  ElementBasedIntegration()),
+        ("SPMS", SinglePassFormulation(),  SegmentBasedIntegration()),
+        ("DPM",  DualPassFormulation(),    SegmentBasedIntegration()),
+    ]
+
+    hdr = @sprintf("%-4s  %-3s  %-10s  %-9s  %-10s  %-10s",
+                   "p", "exp", "n_iface_s", "method", "t(ms)", "t/t_TM")
+    println("\n=== Interface assembly cost (deltoidal sphere) ===")
+    println(hdr)
+    println("-"^length(hdr))
+
+    for p_ord in degrees
+        NQUAD_mortar = p_ord + 2
+        for exp in exp_levels
+            d = _sphere_deltoidal_setup(p_ord, exp; epss=epss,
+                    NQUAD_mortar=NQUAD_mortar, kwargs...)
+
+            # Reference TM time (JIT warm-up + timing)
+            Pc_ref = build_interface_cps(d.pairs_tm, d.p_mat, d.n_mat_ref,
+                                          d.KV_ref, d.P_ref, d.npd, d.nnp,
+                                          TwinMortarFormulation())
+            build_mortar_coupling(Pc_ref, d.pairs_tm, d.p_mat, d.n_mat_ref,
+                d.KV_ref, d.P_ref, d.B_ref, d.ID, d.nnp, d.ned, d.nsd, d.npd, d.neq,
+                NQUAD_mortar, d.epss, ElementBasedIntegration(), TwinMortarFormulation())
+            t_tm = minimum(
+                @elapsed(build_mortar_coupling(Pc_ref, d.pairs_tm, d.p_mat, d.n_mat_ref,
+                    d.KV_ref, d.P_ref, d.B_ref, d.ID, d.nnp, d.ned, d.nsd, d.npd, d.neq,
+                    NQUAD_mortar, d.epss, ElementBasedIntegration(), TwinMortarFormulation()))
+                for _ in 1:n_repeats)
+
+            for (label, form, strat) in configs
+                pairs = form isa TwinMortarFormulation ? d.pairs_tm :
+                        form isa DualPassFormulation   ? d.pairs_tm : d.pairs_sp
+                Pc = build_interface_cps(pairs, d.p_mat, d.n_mat_ref,
+                                          d.KV_ref, d.P_ref, d.npd, d.nnp, form)
+
+                # JIT warm-up
+                build_mortar_coupling(Pc, pairs, d.p_mat, d.n_mat_ref, d.KV_ref,
+                    d.P_ref, d.B_ref, d.ID, d.nnp, d.ned, d.nsd, d.npd, d.neq,
+                    NQUAD_mortar, d.epss, strat, form)
+
+                # Timed runs
+                t_min = minimum(
+                    @elapsed(build_mortar_coupling(Pc, pairs, d.p_mat, d.n_mat_ref,
+                        d.KV_ref, d.P_ref, d.B_ref, d.ID, d.nnp, d.ned, d.nsd, d.npd, d.neq,
+                        NQUAD_mortar, d.epss, strat, form))
+                    for _ in 1:n_repeats)
+
+                ratio = label == "TM" ? 1.0 : t_min / t_tm
+                @printf("%-4d  %-3d  %-10d  %-9s  %-10.2f  %-10.2f\n",
+                        p_ord, exp, d.n_iface_slave, label, t_min*1000, ratio)
+            end
+            println()
+        end
+    end
+end
+
+# ═════════════════════════════════════════════════════════════════════════════
+# ε-sensitivity and conditioning studies for the deltoidal sphere
+# ═════════════════════════════════════════════════════════════════════════════
+
+"""
+    _compute_kappa(K_bc, C, Z) -> Float64
+
+Condition number κ(A) of the full augmented KKT matrix [K C; Cᵀ -Z].
+"""
+function _compute_kappa(
+    K_bc::SparseMatrixCSC{Float64,Int},
+    C::AbstractMatrix{Float64},
+    Z::AbstractMatrix{Float64}
+)::Float64
+    Kd = Matrix(K_bc); Cd = Matrix(C); Zd = Matrix(Z)
+    A = [Kd Cd; Cd' -Zd]
+    sv = svdvals(A)
+    return sv[1] / sv[end]
+end
+
+"""
+    solve_sphere_deltoidal_diag(p_ord, exp_level; ...) -> NamedTuple
+
+Like `solve_sphere_deltoidal` but also returns the condition number κ(A).
+"""
+function solve_sphere_deltoidal_diag(
+    p_ord::Int,
+    exp_level::Int;
+    r_i::Float64                     = 1.0,
+    r_c::Float64                     = 1.2,
+    r_o::Float64                     = 1.4,
+    E::Float64                       = 1.0,
+    nu::Float64                      = 0.3,
+    p_i::Float64                     = 0.01,
+    epss::Float64                    = 0.0,
+    NQUAD::Int                       = p_ord + 1,
+    NQUAD_mortar::Int                = p_ord + 2,
+    strategy::IntegrationStrategy    = ElementBasedIntegration(),
+    formulation::FormulationStrategy = TwinMortarFormulation(),
+    n_ang_outer_base::Int            = 2,
+    n_ang_inner_base::Int            = 3,
+    n_rad_base::Int                  = 1,
+)
+    nsd = 3;  npd = 3;  ned = 3
+
+    n_ang_outer = n_ang_outer_base * 2^exp_level
+    n_ang_inner = n_ang_inner_base * 2^exp_level
+    n_rad       = n_rad_base * 2^exp_level
+
+    B_ref, P_ref, p_mat, n_mat_ref, KV_ref, npc =
+        sphere_deltoidal(p_ord, n_ang_inner, n_ang_outer, n_rad;
+                         r_i=r_i, r_c=r_c, r_o=r_o)
+    ncp = size(B_ref, 1)
+    epss_use = epss > 0.0 ? epss : (p_ord == 1 ? 1e4 : 100.0)
+
+    nel, nnp, nen = patch_metrics(npc, npd, p_mat, n_mat_ref)
+    IEN = build_ien(nsd, npd, npc, p_mat, n_mat_ref, nel, nnp, nen)
+    INC = [build_inc(n_mat_ref[pc, :]) for pc in 1:npc]
+
+    dBC = [1  4  2  1  4;
+           1  5  2  3  6;
+           2  5  2  1  4;
+           2  4  2  2  5;
+           3  5  2  2  5;
+           3  4  2  3  6]
+    bc_per_dof = dirichlet_bc_control_points(p_mat, n_mat_ref, KV_ref, P_ref,
+                                              npd, nnp, ned, dBC)
+    neq, ID = build_id(bc_per_dof, ned, ncp)
+    LM      = build_lm(nen, ned, npc, nel, ID, IEN, P_ref)
+
+    mats = [LinearElastic(E, nu, :three_d) for _ in 1:npc]
+    Ub0  = zeros(ncp, nsd)
+    K, _ = build_stiffness_matrix(npc, nsd, npd, ned, neq,
+                                   p_mat, n_mat_ref, KV_ref, P_ref, B_ref, Ub0,
+                                   nen, nel, IEN, INC, LM, mats, NQUAD, 1.0)
+
+    stress_fn = (x, y, z) -> lame_stress_sphere(x, y, z; p_i=p_i, r_i=r_i, r_o=r_o)
+    F = zeros(neq)
+    for pc in 1:3
+        F = segment_load(n_mat_ref[pc,:], p_mat[pc,:], KV_ref[pc], P_ref[pc], B_ref,
+                         nnp[pc], nen[pc], nsd, npd, ned,
+                         Int[], 1, ID, F, stress_fn, 1.0, NQUAD)
+    end
+    K_bc, F_bc = enforce_dirichlet(Tuple{Int,Float64}[], K, F)
+
+    pairs = [InterfacePair(1, 6, 4, 1), InterfacePair(4, 1, 1, 6),
+             InterfacePair(2, 6, 5, 1), InterfacePair(5, 1, 2, 6),
+             InterfacePair(3, 6, 6, 1), InterfacePair(6, 1, 3, 6)]
+    Pc = build_interface_cps(pairs, p_mat, n_mat_ref, KV_ref, P_ref, npd, nnp,
+                              formulation)
+    C, Z = build_mortar_coupling(Pc, pairs, p_mat, n_mat_ref, KV_ref, P_ref, B_ref,
+                                  ID, nnp, ned, nsd, npd, neq, NQUAD_mortar, epss_use,
+                                  strategy, formulation)
+
+    # Condition number
+    κ = _compute_kappa(K_bc, C, Z)
+
+    # Solve
+    U, _ = solve_mortar(K_bc, C, Z, F_bc)
+
+    # Errors
+    σ_abs, σ_ref = l2_stress_error_sphere(
+        U, ID, npc, nsd, npd, p_mat, n_mat_ref, KV_ref, P_ref, B_ref,
+        nen, nel, IEN, INC, mats, NQUAD, stress_fn)
+
+    disp_fn = (x, y, z) -> lame_displacement_sphere(x, y, z;
+        p_i=p_i, r_i=r_i, r_o=r_o, E=E, nu=nu)
+    l2_abs, l2_ref = l2_disp_error_sphere(
+        U, ID, npc, nsd, npd, p_mat, n_mat_ref, KV_ref, P_ref, B_ref,
+        nen, nel, IEN, INC, NQUAD, disp_fn)
+
+    en_abs, en_ref = energy_error_sphere(
+        U, ID, npc, nsd, npd, p_mat, n_mat_ref, KV_ref, P_ref, B_ref,
+        nen, nel, IEN, INC, mats, NQUAD, stress_fn)
+
+    return (σ_rel=σ_abs/σ_ref, σ_abs=σ_abs,
+            l2_rel=l2_abs/l2_ref, l2_abs=l2_abs,
+            en_rel=en_abs/en_ref, en_abs=en_abs,
+            kappa=κ)
+end
+
+"""
+    run_eps_sweep_sphere_deltoidal(; degrees, exp_level, epss_range, kwargs...)
+
+Print ε-sensitivity table: L2 disp, energy, L2 stress, and κ(A) vs ε
+for each degree at a fixed refinement level.
+"""
+function run_eps_sweep_sphere_deltoidal(;
+    degrees::Vector{Int}        = [1, 2, 3, 4],
+    exp_level::Int              = 2,
+    epss_range::Vector{Float64} = [1e-2, 1e-1, 1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7],
+    kwargs...
+)
+    println("\n", "=" ^ 100)
+    @printf("  ε-sensitivity + conditioning: deltoidal sphere, exp = %d\n", exp_level)
+    println("=" ^ 100)
+
+    for p in degrees
+        @printf("\n─── p = %d ─────────────────────────────────────────────────────────────────────────────\n", p)
+        @printf("  %10s  %12s  %12s  %12s  %12s\n",
+                "ε", "||e||_disp", "||e||_energy", "||e||_σ", "κ(A)")
+        for eps in epss_range
+            try
+                r = solve_sphere_deltoidal_diag(p, exp_level; epss=eps, kwargs...)
+                @printf("  %10.2e  %12.4e  %12.4e  %12.4e  %12.4e\n",
+                        eps, r.l2_abs, r.en_abs, r.σ_abs, r.kappa)
+            catch ex
+                @printf("  %10.2e  ERROR: %s\n", eps, string(ex)[1:min(60, end)])
+            end
+            flush(stdout)
+        end
+    end
+end
