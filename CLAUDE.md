@@ -33,7 +33,8 @@ IGAros/
 │   ├── MortarGeometry.jl           # closest_point_1d/2d
 │   ├── MortarAssembly.jl           # interface DOFs, C/D/M/Z matrices
 │   ├── MortarIntegration.jl        # element-based & segment-based integration
-│   └── MortarSolver.jl             # KKT solve for Twin Mortar tying
+│   ├── MortarSolver.jl             # KKT solve for Twin Mortar tying
+│   └── RunMetadata.jl              # write_meta_toml helper (run provenance)
 ├── examples/                       # benchmark drivers, produce data in ../results/
 ├── benchmark/                      # performance benchmarks + SLURM scripts
 ├── test/                           # unit tests (runtests.jl)
