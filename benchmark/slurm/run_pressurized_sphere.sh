@@ -3,7 +3,7 @@
 #SBATCH --output=pressurized_sphere.out
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
-#SBATCH --mem=64gb
+#SBATCH --mem=128gb
 #SBATCH --time=06:00:00
 #SBATCH --partition=express
 

@@ -23,7 +23,7 @@ jid1=$(sbatch --export=ALL <<'SLURM' | awk '{print $NF}'
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=16gb
-#SBATCH --time=00:30:00
+#SBATCH --time=01:00:00
 #SBATCH --partition=express
 
 PROJECT_DIR="${HOME}/Projects/twin_mortar/IGAros"
@@ -72,8 +72,8 @@ jid3=$(sbatch --export=ALL <<'SLURM' | awk '{print $NF}'
 #SBATCH --output=nquad_sweep_3d.out
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=16gb
-#SBATCH --time=01:30:00
+#SBATCH --mem=32gb
+#SBATCH --time=04:00:00
 #SBATCH --partition=express
 
 PROJECT_DIR="${HOME}/Projects/twin_mortar/IGAros"
