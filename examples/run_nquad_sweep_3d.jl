@@ -312,7 +312,7 @@ nquad_methods = [
 slave_labels = Dict(:lower => "sL", :upper => "sU")
 slave_choices = [:lower, :upper]
 p_range = [1, 2, 3, 4]
-nquad_range = 1:100
+nquad_range = 1:30
 
 println("=== NQUAD sweep ===")
 open(joinpath(results_dir, "nquad_sweep.csv"), "w") do io
