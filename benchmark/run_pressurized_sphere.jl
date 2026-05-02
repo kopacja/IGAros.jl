@@ -60,7 +60,9 @@ function sphere_solve(p, exp_level;
             n_ang_inner_base=bm.n_in,
             n_rad_base=bm.n_rad)
 
-    return BenchmarkResult(l2_disp=r.l2_abs, energy=r.en_abs, l2_stress=r.σ_abs)
+    kappa = safe_kappa(r.K_bc, r.C, r.Z; max_dof=max_dof)
+    return BenchmarkResult(l2_disp=r.l2_abs, energy=r.en_abs, l2_stress=r.σ_abs,
+                           kappa=kappa, ndof=r.neq, n_lam=size(r.C, 2))
 end
 
 function h_fn(p, exp)

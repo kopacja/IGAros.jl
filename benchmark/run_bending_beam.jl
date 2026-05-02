@@ -42,13 +42,23 @@ function beam_solve(p, exp_level;
                     kwargs...)
     eps_use = formulation isa SinglePassFormulation ? 0.0 : epss
 
-    r = solve_beam(p, exp_level;
+    r = if p == 1
+        solve_beam_p1(exp_level;
             E=E_VAL, nu=NU_VAL, p_load=P_LOAD,
             l_x=L_X, l_y=L_Y, l_z=L_Z,
             epss=eps_use, NQUAD_mortar=NQUAD_mortar,
             strategy=strategy, formulation=formulation)
+    else
+        solve_beam(p, exp_level;
+            E=E_VAL, nu=NU_VAL, p_load=P_LOAD,
+            l_x=L_X, l_y=L_Y, l_z=L_Z,
+            epss=eps_use, NQUAD_mortar=NQUAD_mortar,
+            strategy=strategy, formulation=formulation)
+    end
 
-    return BenchmarkResult(l2_disp=r.l2_abs, energy=r.en_abs, l2_stress=r.σ_abs)
+    kappa = safe_kappa(r.K_bc, r.C, r.Z; max_dof=max_dof)
+    return BenchmarkResult(l2_disp=r.l2_abs, energy=r.en_abs, l2_stress=r.σ_abs,
+                           kappa=kappa, ndof=r.neq, n_lam=size(r.C, 2))
 end
 
 function h_fn(p, exp)

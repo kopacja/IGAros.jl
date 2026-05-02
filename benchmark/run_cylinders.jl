@@ -40,17 +40,19 @@ function cyl_solve(p, exp_level;
                    kwargs...)
     eps_use = formulation isa SinglePassFormulation ? 0.0 : epss
 
-    if p == 1
-        s_rel, s_abs, d_rel, d_abs, en_rel, en_abs = solve_cylinder_p1(
+    r = if p == 1
+        solve_cylinder_p1(
             exp_level; epss=eps_use, NQUAD_mortar=NQUAD_mortar,
             strategy=strategy, formulation=formulation)
     else
-        s_rel, s_abs, d_rel, d_abs, en_rel, en_abs = solve_cylinder(
+        solve_cylinder(
             p, exp_level; epss=eps_use, NQUAD_mortar=NQUAD_mortar,
             strategy=strategy, formulation=formulation)
     end
 
-    return BenchmarkResult(l2_disp=d_abs, energy=en_abs, l2_stress=s_abs)
+    kappa = safe_kappa(r.K_bc, r.C, r.Z; max_dof=max_dof)
+    return BenchmarkResult(l2_disp=r.l2_abs, energy=r.en_abs, l2_stress=r.σ_abs,
+                           kappa=kappa, ndof=r.neq, n_lam=size(r.C, 2))
 end
 
 function h_fn(p, exp)

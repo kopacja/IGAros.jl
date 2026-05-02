@@ -44,10 +44,11 @@ function plate_solve(p, exp_level;
             epss=eps_use, NQUAD_mortar=NQUAD_mortar,
             strategy=strategy, formulation=formulation)
 
+    kappa = safe_kappa(r.K_bc, r.C, r.Z; max_dof=max_dof)
     # r.l2_abs = L2 stress error, r.d_abs = L2 disp error, r.en_abs = energy error
     return BenchmarkResult(
         l2_disp=r.d_abs, energy=r.en_abs, l2_stress=r.l2_abs,
-        ndof=0, n_lam=0)
+        kappa=kappa, ndof=r.neq, n_lam=size(r.C, 2))
 end
 
 # h = radial element size for outer (coarser) patch

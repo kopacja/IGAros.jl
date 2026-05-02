@@ -674,7 +674,8 @@ function solve_plate_full(
 
     return (l2_rel=l2_abs/l2_ref, l2_abs=l2_abs,
             en_rel=en_abs/en_ref, en_abs=en_abs,
-            d_rel=d_abs/d_ref, d_abs=d_abs)
+            d_rel=d_abs/d_ref, d_abs=d_abs,
+            K_bc=K_bc, C=C, Z=Z, neq=neq)
 end
 
 # ─────────────────────── Convergence study ───────────────────────────────────

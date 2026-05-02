@@ -520,7 +520,10 @@ function solve_cylinder(
         nen, nel, IEN, INC, mats, NQUAD, thickness, stress_fn
     )
 
-    return s_abs / s_ref, s_abs, d_abs / d_ref, d_abs, en_abs / en_ref, en_abs
+    return (σ_rel=s_abs/s_ref, σ_abs=s_abs,
+            l2_rel=d_abs/d_ref, l2_abs=d_abs,
+            en_rel=en_abs/en_ref, en_abs=en_abs,
+            K_bc=K_bc, C=C, Z=Z, neq=neq)
 end
 
 # ─────────────────────── Reference-solution convergence ───────────────────────
@@ -1058,7 +1061,10 @@ function solve_cylinder_p1(
         U, ID, npc, nsd, npd, p_mat, n_mat, KV, P, B,
         nen, nel, IEN, INC, mats, NQUAD, thickness, stress_fn)
 
-    return l2_abs / l2_ref, l2_abs, d_abs / d_ref, d_abs, en_abs / en_ref, en_abs
+    return (σ_rel=l2_abs/l2_ref, σ_abs=l2_abs,
+            l2_rel=d_abs/d_ref, l2_abs=d_abs,
+            en_rel=en_abs/en_ref, en_abs=en_abs,
+            K_bc=K_bc, C=C, Z=Z, neq=neq)
 end
 
 """

@@ -997,7 +997,8 @@ function solve_beam(
 
     return (l2_rel=l2_abs/l2_ref, l2_abs=l2_abs,
             σ_rel=σ_abs/σ_ref, σ_abs=σ_abs,
-            en_rel=en_abs/en_ref, en_abs=en_abs)
+            en_rel=en_abs/en_ref, en_abs=en_abs,
+            K_bc=K_bc, C=C_bc, Z=Z, neq=neq)
 end
 
 # ─── Single-level solve p=1 ───────────────────────────────────────────────────
@@ -1159,7 +1160,12 @@ function solve_beam_p1(
                        nen, IEN, INC, E, nu; n_vis=n_vis)
     end
 
-    return err_abs / err_ref, err_abs
+    # Named tuple return parallels solve_beam (σ/energy not computed for p=1
+    # in this driver — legacy gap; cf. Manuscript Debt).
+    return (l2_rel=err_abs/err_ref, l2_abs=err_abs,
+            σ_rel=NaN, σ_abs=NaN,
+            en_rel=NaN, en_abs=NaN,
+            K_bc=K_bc, C=C_bc, Z=Z, neq=neq)
 end
 
 # ─── Convergence study ─────────────────────────────────────────────────────────

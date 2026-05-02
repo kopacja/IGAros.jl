@@ -449,7 +449,8 @@ function solve_sphere_deltoidal(
 
     return (σ_rel=σ_abs/σ_ref, σ_abs=σ_abs,
             l2_rel=l2_abs/l2_ref, l2_abs=l2_abs,
-            en_rel=en_abs/en_ref, en_abs=en_abs)
+            en_rel=en_abs/en_ref, en_abs=en_abs,
+            K_bc=K_bc, C=C, Z=Z, neq=neq)
 end
 
 # ─── Convergence study driver ─────────────────────────────────────────────────
