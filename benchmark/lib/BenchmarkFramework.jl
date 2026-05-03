@@ -117,6 +117,7 @@ Base.@kwdef struct BenchmarkResult
     energy::Float64    = NaN
     l2_stress::Float64 = NaN
     kappa::Float64     = NaN
+    lam_err::Float64   = NaN   # |‖λ^(s)‖_∞ - λ_exact| (flat patch test)
     ndof::Int          = 0
     n_lam::Int         = 0
     wall_s::Float64    = NaN
@@ -154,6 +155,7 @@ function run_convergence(
                              ndof=r.ndof, n_lam=r.n_lam,
                              l2_disp=r.l2_disp, energy=r.energy,
                              l2_stress=r.l2_stress, kappa=r.kappa,
+                             lam_err=r.lam_err,
                              wall_s=dt))
                 @printf("  %-6s p=%d exp=%d  L2d=%.3e  E=%.3e  σ=%.3e  κ=%.3e  (%.1fs)\n",
                         cfg.label, p, e, r.l2_disp, r.energy, r.l2_stress, r.kappa, dt)
@@ -187,6 +189,7 @@ function run_eps_sweep(
             push!(rows, (method=cfg.label, p=p, exp=exp_level, eps=eps,
                          l2_disp=r.l2_disp, energy=r.energy,
                          l2_stress=r.l2_stress, kappa=r.kappa,
+                         lam_err=r.lam_err,
                          wall_s=dt))
             @printf("  %-6s p=%d ε=%.1e  L2d=%.3e  κ=%.3e\n",
                     cfg.label, p, eps, r.l2_disp, r.kappa)

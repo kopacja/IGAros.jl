@@ -51,8 +51,19 @@ function flat_solve(p, _exp_unused;
 
     kappa = safe_kappa(r.K_bc, r.C, r.Z; max_dof=max_dof)
 
+    # ‖λ^(s)‖_∞ - 1 metric for tab:patch_lambda. Exact value is 1
+    # (uniform unit traction).
+    lam_inf_s = if formulation isa SinglePassFormulation
+        norm(r.Lambda, Inf)
+    else
+        half = length(r.Lambda) ÷ 2
+        norm(r.Lambda[1:half], Inf)
+    end
+    lam_err = abs(lam_inf_s - 1.0)
+
     return BenchmarkResult(l2_disp=d_err, energy=NaN, l2_stress=NaN,
-                           kappa=kappa, ndof=r.neq, n_lam=size(r.C, 2))
+                           kappa=kappa, lam_err=lam_err,
+                           ndof=r.neq, n_lam=size(r.C, 2))
 end
 
 # ═══════════════════════════════════════════════════════════════════════════════

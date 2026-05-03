@@ -117,7 +117,7 @@ function flat_patch_test(
 
     U, Lambda = solve_mortar(K_bc, C, Z, F_bc)
 
-    return (U=U, C=C, Z=Z, K_bc=K_bc, F_bc=F_bc, ID=ID, B=B, ncp=ncp,
+    return (U=U, Lambda=Lambda, C=C, Z=Z, K_bc=K_bc, F_bc=F_bc, ID=ID, B=B, ncp=ncp,
             neq=neq, Pc=Pc, E=E,
             p_mat=p, n_mat=n, KV=KV, P=P,
             nel=nel, nnp=nnp, nen=nen, IEN=IEN, INC=INC,
@@ -240,7 +240,7 @@ function flat_patch_test_hp(
 
     U, Lambda = solve_mortar(K_bc, C, Z, F_bc)
 
-    return (U=U, C=C, Z=Z, K_bc=K_bc, F_bc=F_bc, ID=ID, B=B, ncp=ncp,
+    return (U=U, Lambda=Lambda, C=C, Z=Z, K_bc=K_bc, F_bc=F_bc, ID=ID, B=B, ncp=ncp,
             neq=neq, Pc=Pc, E=E,
             p_mat=p_mat, n_mat=n_mat, KV=KV, P=P,
             nel=nel, nnp=nnp, nen=nen, IEN=IEN, INC=INC,
