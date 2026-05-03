@@ -3,8 +3,8 @@
 #SBATCH --output=plate_with_hole.out
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=16gb
-#SBATCH --time=03:00:00
+#SBATCH --mem=64gb
+#SBATCH --time=05:00:00
 #SBATCH --partition=express
 
 SCRIPT_DIR="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$0")" && pwd)}"
