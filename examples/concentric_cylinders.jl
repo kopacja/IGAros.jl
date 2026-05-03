@@ -403,7 +403,7 @@ function solve_cylinder(
     formulation::FormulationStrategy = TwinMortarFormulation(),
     n_ang_p2_base::Int = 3,   # outer-patch angular base (h ∝ 1/(base·2^exp))
     n_ang_p1_base::Int = 6,   # inner-patch angular base (2:1 by default)
-)::NTuple{6, Float64}
+)
 
     nsd = 2; npd = 2; ned = 2; npc = 2
     thickness = 1.0
@@ -987,7 +987,7 @@ function solve_cylinder_p1(
     formulation::FormulationStrategy = TwinMortarFormulation(),
     n_ang_p2_base::Int    = 3,     # base angular elements for outer patch
     n_ang_p1_base::Int    = 6,     # base angular elements for inner patch (non-conforming)
-)::NTuple{6, Float64}
+)
 
     nsd = 2; npd = 2; ned = 2; npc = 2; thickness = 1.0
 
