@@ -36,7 +36,7 @@ const NQUAD_SWEEP_EXP = 2
 function cyl_solve(p, exp_level;
                    formulation, strategy, epss,
                    NQUAD_mortar::Int = (p == 1 ? 3 : 10),
-                   max_dof::Int = typemax(Int),
+                   max_dof::Int = 5000,
                    kwargs...)
     eps_use = formulation isa SinglePassFormulation ? 0.0 : epss
 
@@ -118,7 +118,7 @@ println("=" ^ 90)
 # ── 1. Convergence ───────────────────────────────────────────────────────────
 println("\n>>> Convergence study...")
 conv = run_convergence(cyl_solve, ALL_6_METHODS, DEGREES, EXP_RANGE;
-    h_fn=h_fn, eps_fn=eps_fn, max_dof=typemax(Int))
+    h_fn=h_fn, eps_fn=eps_fn, max_dof=5000)
 write_csv(joinpath(outdir, "convergence.csv"), conv)
 
 # ── 2. Force moments (p=2,3 at exp=2) ────────────────────────────────────────
@@ -131,7 +131,7 @@ write_csv(joinpath(outdir, "moments.csv"), moments)
 println("\n>>> ε sweep...")
 eps_methods = [m for m in ALL_6_METHODS if !is_single_pass(m)]
 eps_rows = run_eps_sweep(cyl_solve, eps_methods, [1, 2, 3, 4], EPS_SWEEP_EXP, EPS_RANGE;
-    max_dof=typemax(Int))
+    max_dof=5000)
 write_csv(joinpath(outdir, "eps_sweep.csv"), eps_rows)
 
 # ── 4. NQUAD sweep ──────────────────────────────────────────────────────────
