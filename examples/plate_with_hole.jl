@@ -897,6 +897,8 @@ function solve_plate_p1(
     NQUAD::Int         = 2,
     NQUAD_mortar::Int  = 10,
     n_ang_base::Int    = 3,
+    strategy::IntegrationStrategy    = ElementBasedIntegration(),
+    formulation::FormulationStrategy = TwinMortarFormulation(),
 )
 
     nsd = 2; npd = 2; ned = 2; npc = 2; thickness = 1.0
@@ -943,16 +945,21 @@ function solve_plate_p1(
     K_bc, F_bc = enforce_dirichlet(Tuple{Int,Float64}[], K, F)
 
     # Interface: Patch 2 facet 2 (ξ_max, at 135°) ↔ Patch 1 facet 4 (ξ_min, at 135°)
-    pairs = [InterfacePair(2, 2, 1, 4), InterfacePair(1, 4, 2, 2)]
-    Pc = build_interface_cps(pairs, p_mat, n_mat, KV, P, npd, nnp)
+    pairs_full = [InterfacePair(2, 2, 1, 4), InterfacePair(1, 4, 2, 2)]
+    pairs = formulation isa SinglePassFormulation ? pairs_full[1:1] : pairs_full
+    Pc = build_interface_cps(pairs, p_mat, n_mat, KV, P, npd, nnp, formulation)
 
     C, Z = build_mortar_coupling(Pc, pairs, p_mat, n_mat, KV, P, B,
                                   ID, nnp, ned, nsd, npd, neq, NQUAD_mortar, epss_use,
-                                  ElementBasedIntegration())
+                                  strategy, formulation)
 
     U, _ = solve_mortar(K_bc, C, Z, F_bc)
 
     err_abs, err_ref = l2_stress_error(
+        U, ID, npc, nsd, npd, p_mat, n_mat, KV, P, B,
+        nen, nel, IEN, INC, mats, NQUAD, thickness; Tx=Tx, R=R)
+
+    en_abs, en_ref = energy_error_plate(
         U, ID, npc, nsd, npd, p_mat, n_mat, KV, P, B,
         nen, nel, IEN, INC, mats, NQUAD, thickness; Tx=Tx, R=R)
 
@@ -961,7 +968,9 @@ function solve_plate_p1(
         nen, nel, IEN, INC, NQUAD, thickness; Tx=Tx, R=R, E=E, nu=nu)
 
     return (l2_rel=err_abs/err_ref, l2_abs=err_abs,
-            d_rel=d_abs/d_ref, d_abs=d_abs)
+            en_rel=en_abs/en_ref, en_abs=en_abs,
+            d_rel=d_abs/d_ref, d_abs=d_abs,
+            K_bc=K_bc, C=C, Z=Z, neq=neq)
 end
 
 # ─────────────────────── p=1 convergence ──────────────────────────────────────

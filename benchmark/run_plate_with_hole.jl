@@ -39,10 +39,17 @@ function plate_solve(p, exp_level;
                      kwargs...)
     eps_use = formulation isa SinglePassFormulation ? 0.0 : epss
 
-    r = solve_plate_full(p, exp_level;
+    r = if p == 1
+        solve_plate_p1(exp_level;
             E=E_VAL, nu=NU_VAL, Tx=TX_VAL, R=R_VAL,
             epss=eps_use, NQUAD_mortar=NQUAD_mortar,
             strategy=strategy, formulation=formulation)
+    else
+        solve_plate_full(p, exp_level;
+            E=E_VAL, nu=NU_VAL, Tx=TX_VAL, R=R_VAL,
+            epss=eps_use, NQUAD_mortar=NQUAD_mortar,
+            strategy=strategy, formulation=formulation)
+    end
 
     kappa = safe_kappa(r.K_bc, r.C, r.Z; max_dof=max_dof)
     # r.l2_abs = L2 stress error, r.d_abs = L2 disp error, r.en_abs = energy error
