@@ -4,8 +4,8 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64gb
-#SBATCH --time=05:00:00
-#SBATCH --partition=express
+#SBATCH --time=12:00:00
+#SBATCH --partition=short
 
 SCRIPT_DIR="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$0")" && pwd)}"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"

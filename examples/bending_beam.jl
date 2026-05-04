@@ -1040,7 +1040,7 @@ function solve_beam_p1(
     curved::Bool                  = true,  # true → curved arc interface (variational crime demo)
     vtk_prefix::String            = "",  # write VTK if non-empty (e.g. "beam_p1")
     n_vis::Int                    = 4,   # VTK sampling points per knot span per direction
-)::Tuple{Float64, Float64}
+)
 
     nsd = 3;  npd = 3;  ned = 3;  npc = 2;  p_ord = 1
 

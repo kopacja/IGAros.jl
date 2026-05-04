@@ -3,8 +3,8 @@
 #SBATCH --output=cylinders.out
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=32gb
-#SBATCH --time=08:00:00
+#SBATCH --mem=64gb
+#SBATCH --time=12:00:00
 #SBATCH --partition=short
 
 SCRIPT_DIR="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$0")" && pwd)}"
