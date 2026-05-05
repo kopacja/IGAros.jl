@@ -18,7 +18,7 @@ using Printf, Dates
 # ═══════════════════════════════════════════════════════════════════════════════
 
 const DEGREES   = [1, 2, 3, 4]
-const EXP_RANGE = 0:3
+const EXP_RANGE = 0:4
 const E_VAL     = 1000.0
 const NU_VAL    = 0.0
 const P_LOAD    = 10.0
