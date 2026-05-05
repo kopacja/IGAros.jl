@@ -29,7 +29,7 @@ const EPS_RANGE = 10.0 .^ (-2:0.5:8)
 const NQUAD_RANGE = 2:8
 const EPS_SWEEP_EXP  = 1
 const NQUAD_SWEEP_EXP = 1
-const SVD_MAX   = 15000
+const SVD_MAX   = 5000
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Solver adapter
