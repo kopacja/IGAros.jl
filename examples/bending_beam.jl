@@ -1160,11 +1160,16 @@ function solve_beam_p1(
                        nen, IEN, INC, E, nu; n_vis=n_vis)
     end
 
-    # Named tuple return parallels solve_beam (σ/energy not computed for p=1
-    # in this driver — legacy gap; cf. Manuscript Debt).
+    # Energy norm via energy_error_beam (mirrors solve_beam at p≥2).
+    stress_fn = (x, y, z) -> beam_exact_stress(x, y, z;
+        p_load=p_load, E=E, nu=nu, l_y=l_y)
+    en_abs, en_ref = energy_error_beam(
+        U, ID, npc, nsd, npd, p_mat, n_mat_ref, KV_ref, P_ref, B_ref,
+        nen, nel, IEN, INC, mats, NQUAD, stress_fn)
+
     return (l2_rel=err_abs/err_ref, l2_abs=err_abs,
             σ_rel=NaN, σ_abs=NaN,
-            en_rel=NaN, en_abs=NaN,
+            en_rel=en_abs/en_ref, en_abs=en_abs,
             K_bc=K_bc, C=C_bc, Z=Z, neq=neq)
 end
 
