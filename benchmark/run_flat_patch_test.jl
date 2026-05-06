@@ -26,6 +26,15 @@ const EPSS_DEF = 10.0   # default ε for two-pass methods
 const EPS_RANGE = 10.0 .^ (-2:0.5:8)
 const NQUAD_RANGE = 1:20
 
+# §3.3 demonstration: TME vs TME with master-master Z block (P^(ms)) dropped.
+# Same C, same multiplier space; only the cross-mass term in Z's diagonal blocks
+# is removed.  Expected: TME passes the patch test, TME_NoP fails — empirical
+# evidence that P^(ms) cannot be omitted from the production formulation.
+const NO_PMS_DEMO_METHODS = [
+    MethodConfig("TME",     TwinMortarFormulation(),            ElementBasedIntegration()),
+    MethodConfig("TME_NoP", TwinMortarFormulationNoCrossMass(), ElementBasedIntegration()),
+]
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Solver adapter
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -165,12 +174,20 @@ nq_rows = run_nquad_sweep(flat_solve, NQUAD_METHODS, DEGREES, 0, NQUAD_RANGE;
     eps_fn = (p, e) -> EPSS_DEF)
 write_csv(joinpath(outdir, "nquad_sweep.csv"), nq_rows)
 
-# ── 5. Meta ───────────────────────────────────────────────────────────────────
+# ── 5. P^(ms) demonstration: TME with master-master Z block dropped ─────────
+println("\n>>> P^(ms) drop demonstration (§3.3 sister table)...")
+no_pms_rows = run_convergence(flat_solve, NO_PMS_DEMO_METHODS, DEGREES, [0];
+    h_fn = (p, e) -> 1.0 / N_S,
+    eps_fn = (p, e) -> EPSS_DEF,
+    max_dof = typemax(Int))
+write_csv(joinpath(outdir, "no_pms_demo.csv"), no_pms_rows)
+
+# ── 6. Meta ───────────────────────────────────────────────────────────────────
 write_meta(joinpath(outdir, "meta.toml");
-    description="2D flat patch test: factorial + ε sweep + NQUAD sweep + moments",
+    description="2D flat patch test: factorial + ε sweep + NQUAD sweep + moments + P^(ms) drop demo",
     params=Dict("E" => E_VAL, "nu" => NU_VAL, "n_s" => N_S, "n_m" => N_M,
                 "epss_default" => EPSS_DEF, "degrees" => DEGREES),
-    outputs=["factorial.csv", "moments.csv", "eps_sweep.csv", "nquad_sweep.csv"],
+    outputs=["factorial.csv", "moments.csv", "eps_sweep.csv", "nquad_sweep.csv", "no_pms_demo.csv"],
     wallclock_seconds=time() - t_start)
 
 println("\n>>> Results written to: $outdir")
