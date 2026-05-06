@@ -53,6 +53,7 @@ export
     # MortarIntegration
     IntegrationStrategy, ElementBasedIntegration, SegmentBasedIntegration,
     FormulationStrategy, TwinMortarFormulation, SinglePassFormulation, DualPassFormulation,
+    TwinMortarFormulationNoCrossMass,
     NormalStrategy, SlaveNormal, MasterNormal, AverageNormal,
     SegmentCell2D, sutherland_hodgman_clip, triangulate_polygon, tri_gauss_rule,
     find_interface_segments_1d, find_interface_segments_2d,

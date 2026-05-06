@@ -87,6 +87,21 @@ integration (symmetric intersection segments) the result is identical to
 """
 struct DualPassFormulation <: FormulationStrategy end
 
+"""
+    TwinMortarFormulationNoCrossMass()
+
+Twin Mortar formulation with the master-master cross-mass block of Z
+(P^(ms) = integral of bar{N}^(m)^T * bar{N}^(m) over Gamma^(s)) omitted
+from each half-pass.  Used **only** to demonstrate that the cross-mass
+term cannot be dropped: without it, the diagonal block of Z collapses
+to (1/2) D^(s) and the patch test fails on non-conforming meshes.
+Slave-master and master-slave blocks of Z are retained (they are
+required for symmetry of Z).  Otherwise identical to
+`TwinMortarFormulation`: same multiplier space, same C assembly,
+same dispatch through `build_mortar_coupling`.
+"""
+struct TwinMortarFormulationNoCrossMass <: FormulationStrategy end
+
 # ─── Normal (constraint direction) strategy ──────────────────────────────────
 #
 # Note: The Lagrange multiplier λ is now resolved in global Cartesian directions

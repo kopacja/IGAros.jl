@@ -57,6 +57,9 @@ end
 _cp_facets(pair, ::TwinMortarFormulation)  =
     [(pair.slave_patch, pair.slave_facet),
      (pair.master_patch, pair.master_facet)]
+_cp_facets(pair, ::TwinMortarFormulationNoCrossMass) =
+    [(pair.slave_patch, pair.slave_facet),
+     (pair.master_patch, pair.master_facet)]
 _cp_facets(pair, ::DualPassFormulation)    =
     [(pair.slave_patch, pair.slave_facet),
      (pair.master_patch, pair.master_facet)]
@@ -106,6 +109,15 @@ Arguments
 # Dispatch wrapper — TwinMortarFormulation delegates to the core kernel
 @inline function _accumulate_mortar!(C, Z, ::TwinMortarFormulation, args...)
     _accumulate_mortar!(C, Z, args...)
+end
+
+# Dispatch wrapper — TwinMortarFormulationNoCrossMass delegates to the core
+# kernel with the master-master P^(ms) block omitted.  Slave-master and
+# master-slave blocks of Z are retained (required for symmetry).  Used only
+# to demonstrate that P^(ms) cannot be dropped (patch test fails without it
+# on non-conforming meshes).
+@inline function _accumulate_mortar!(C, Z, ::TwinMortarFormulationNoCrossMass, args...)
+    _accumulate_mortar!(C, Z, args...; assemble_cross_mass=false)
 end
 
 # Dispatch wrapper — DualPassFormulation has its own kernel
@@ -188,7 +200,8 @@ function _accumulate_mortar!(
     dir_vecs::AbstractMatrix{Float64},
     Pc::AbstractVector{Int}, nlm::Int,
     ID::AbstractMatrix{Int}, ned::Int,
-    gwJ::Float64, epss::Float64
+    gwJ::Float64, epss::Float64;
+    assemble_cross_mass::Bool=true
 )
     nsen_s = length(slave_cps)
     nsen_m = length(master_cps)
@@ -272,13 +285,17 @@ function _accumulate_mortar!(
             end
         end
 
-        # Z: master-master  [+ε/2] per direction
-        for cm in 1:nsen_m
-            cp_m_c = master_cps[cm]
-            Am_c   = findfirst(==(cp_m_c), Pc)
-            Am_c === nothing && continue
-            for d in 1:n_dirs
-                Z[Am_b + (d-1)*nlm, Am_c + (d-1)*nlm] += 0.5 * epss * R_m[bm] * R_m[cm] * gwJ
+        # Z: master-master  [+ε/2] per direction  (P^(ms) cross-mass term)
+        # Skipped when `assemble_cross_mass=false` — used for the §3.3 demonstration
+        # that dropping P^(ms) breaks the patch test on non-conforming meshes.
+        if assemble_cross_mass
+            for cm in 1:nsen_m
+                cp_m_c = master_cps[cm]
+                Am_c   = findfirst(==(cp_m_c), Pc)
+                Am_c === nothing && continue
+                for d in 1:n_dirs
+                    Z[Am_b + (d-1)*nlm, Am_c + (d-1)*nlm] += 0.5 * epss * R_m[bm] * R_m[cm] * gwJ
+                end
             end
         end
     end

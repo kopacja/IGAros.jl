@@ -288,6 +288,121 @@ using SparseArrays
         end
     end
 
+    @testset "TwinMortarFormulationNoCrossMass: P^(ms) drop breaks patch test" begin
+        # Demonstration variant for §3.3 of the paper: drop the master-master
+        # cross-mass block P^(ms) from Z while keeping slave-master / master-slave
+        # off-diagonals (required for symmetry of Z).  Expected outcomes:
+        #   1. C is identical to TwinMortarFormulation (cross-mass flag affects Z only)
+        #   2. Z differs from TwinMortarFormulation (D_m^(s) contribution removed)
+        #   3. Patch test on a non-conforming mesh FAILS with the cross-mass term
+        #      dropped — exactly the empirical observation (pre-Architecture-doc
+        #      patch tests rejected the simplification) that motivates retaining
+        #      P^(ms) in the production formulation.
+        p_ord = 2
+        nsd = 2; npd = 2; ned = 2; npc = 2
+        E = 1000.0; nu = 0.0
+
+        n_xi   = p_ord + 1
+        n_eta1 = p_ord + 2
+        n_eta2 = p_ord + 3
+        nquad  = p_ord + 1
+
+        p_mat = fill(p_ord, npc, npd)
+        n_mat = [n_xi n_eta1; n_xi n_eta2]
+        KV   = generate_knot_vectors(npc, npd, p_mat, n_mat)
+        ncp1 = n_xi * n_eta1
+        ncp2 = n_xi * n_eta2
+        ncp  = ncp1 + ncp2
+
+        B = zeros(ncp, 4)
+        for j in 1:n_eta1, i in 1:n_xi
+            r = (j - 1) * n_xi + i
+            B[r, 1] = (i - 1) * 0.5 / p_ord
+            B[r, 2] = (j - 1) / (n_eta1 - 1)
+            B[r, 4] = 1.0
+        end
+        for j in 1:n_eta2, i in 1:n_xi
+            r = ncp1 + (j - 1) * n_xi + i
+            B[r, 1] = 0.5 + (i - 1) * 0.5 / p_ord
+            B[r, 2] = (j - 1) / (n_eta2 - 1)
+            B[r, 4] = 1.0
+        end
+        P = [collect(1:ncp1), collect(ncp1 + 1 : ncp)]
+
+        nel, nnp, nen = patch_metrics(npc, npd, p_mat, n_mat)
+        IEN = build_ien(nsd, npd, npc, p_mat, n_mat, nel, nnp, nen)
+        INC = [build_inc(n_mat[1, :]), build_inc(n_mat[2, :])]
+        mat = LinearElastic(E, nu, :plane_strain)
+
+        left_face_1 = [1 + (j - 1) * n_xi for j in 1:n_eta1]
+        bottom_1    = collect(1:n_xi)
+        bottom_2    = collect(ncp1 + 1 : ncp1 + n_xi)
+        bc_per_dof  = [left_face_1, vcat(bottom_1, bottom_2)]
+        neq, ID = build_id(bc_per_dof, ned, ncp)
+        LM      = build_lm(nen, ned, npc, nel, ID, IEN, P)
+
+        Ub_zero = zeros(ncp, nsd)
+        K, _    = build_stiffness_matrix(
+            npc, nsd, npd, ned, neq,
+            p_mat, n_mat, KV, P, B, Ub_zero,
+            nen, nel, IEN, INC, LM,
+            [mat, mat], nquad, 1.0
+        )
+        F  = zeros(neq)
+        F  = segment_load(
+            n_mat[2, :], p_mat[2, :], KV[2], P[2], B,
+            nnp[2], nen[2], nsd, npd, ned,
+            Int[], 2, ID, F, 1.0, 1.0, nquad
+        )
+        IND        = Tuple{Int,Float64}[]
+        K_bc, F_bc = enforce_dirichlet(IND, K, F)
+
+        pairs = [InterfacePair(1, 2, 2, 4),
+                 InterfacePair(2, 4, 1, 2)]
+        Pc    = build_interface_cps(pairs, p_mat, n_mat, KV, P, npd, nnp,
+                                    TwinMortarFormulationNoCrossMass())
+        # Expected to match the standard TwinMortar union (slave + master)
+        Pc_tm = build_interface_cps(pairs, p_mat, n_mat, KV, P, npd, nnp,
+                                    TwinMortarFormulation())
+        @test Pc == Pc_tm
+
+        nlm = length(Pc)
+        C_tm, Z_tm = build_mortar_coupling(
+            Pc, pairs, p_mat, n_mat, KV, P, B, ID, nnp,
+            ned, nsd, npd, neq, nquad, 1.0, ElementBasedIntegration(),
+            TwinMortarFormulation()
+        )
+        C_np, Z_np = build_mortar_coupling(
+            Pc, pairs, p_mat, n_mat, KV, P, B, ID, nnp,
+            ned, nsd, npd, neq, nquad, 1.0, ElementBasedIntegration(),
+            TwinMortarFormulationNoCrossMass()
+        )
+
+        # 1. C identical: cross-mass flag affects Z only
+        @test C_tm ≈ C_np atol=1e-14
+
+        # 2. Z differs: dropping the master-master kernel block removes D_m^(s)
+        @test !(Z_tm ≈ Z_np)
+
+        # 3. Patch test fails for the no-cross-mass variant.
+        #    Standard TM passes to ~1e-5 (per the test above); TM_NoCrossMass
+        #    must produce a clearly larger error on the same non-conforming mesh.
+        U_tm, _ = solve_mortar(K_bc, C_tm, Z_tm, F_bc)
+        U_np, _ = solve_mortar(K_bc, C_np, Z_np, F_bc)
+
+        err_tm = 0.0
+        err_np = 0.0
+        for A in 1:ncp
+            x_cp = B[A, 1]
+            ux_tm = ID[1, A] != 0 ? U_tm[ID[1, A]] : 0.0
+            ux_np = ID[1, A] != 0 ? U_np[ID[1, A]] : 0.0
+            err_tm = max(err_tm, abs(ux_tm - x_cp / E))
+            err_np = max(err_np, abs(ux_np - x_cp / E))
+        end
+        @test err_tm < 1e-5
+        @test err_np > 100 * err_tm
+    end
+
     @testset "build_interface_cps" begin
         # Conforming interface: both patches share the same CPs (like the 2-patch
         # test in test_assembly.jl). build_interface_cps should return unique union.
