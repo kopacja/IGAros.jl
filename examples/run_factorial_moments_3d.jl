@@ -347,6 +347,8 @@ results_dir = get(ENV, "TM_RESULTS_DIR",
              Dates.format(now(), "yyyy-mm-dd") * "_benchmark"))
 mkpath(results_dir)
 
+t_start = time()
+
 all_methods = [
     ("TME",  TwinMortarFormulation(),  ElementBasedIntegration()),
     ("TMS",  TwinMortarFormulation(),  SegmentBasedIntegration()),
@@ -395,47 +397,48 @@ open(joinpath(results_dir, "factorial.csv"), "w") do io_fact
     end
 end
 
-# ── Meta (TOML) ───────────────────────────────────────────────────────────────
-open(joinpath(results_dir, "meta.toml"), "w") do io
-    println(io, "[run]")
-    println(io, "date = \"", Dates.format(now(), "yyyy-mm-dd"), "\"")
-    println(io, "time = \"", Dates.format(now(), "HH:MM:SS"), "\"")
-    println(io, "description = \"3D flat patch test: factorial + moments (merged)\"")
-    println(io, "hostname = \"", gethostname(), "\"")
-    println(io, "julia_version = \"", VERSION, "\"")
-    println(io, "")
-    println(io, "[geometry]")
-    println(io, "L_lower = 10.0")
-    println(io, "H_lower = 4.0")
-    println(io, "L_upper = 5.0")
-    println(io, "H_upper = 4.0")
-    println(io, "n_lower = 5")
-    println(io, "n_upper = 3")
-    println(io, "n_z = 3")
-    println(io, "interface = \"F6-F1 (overhanging, Farah et al. 2015 Fig. 10)\"")
-    println(io, "")
-    println(io, "[material]")
-    println(io, "E = 100.0")
-    println(io, "nu = 0.0")
-    println(io, "")
-    println(io, "[loading]")
-    println(io, "sigma_app = 0.5")
-    println(io, "description = \"sigma_zz = -0.5 Neumann on P2 top + P1 rim\"")
-    println(io, "")
-    println(io, "[defaults]")
-    println(io, "epss = 10.0")
-    println(io, "NQUAD = \"p+1\"")
-    println(io, "NQUAD_mortar = \"p+2\"")
-    println(io, "degrees = [1, 2, 3, 4]")
-    println(io, "slave_orientations = [\"sL (lower=slave)\", \"sU (upper=slave)\"]")
-    println(io, "")
-    println(io, "[studies]")
-    println(io, "factorial = \"6 methods x 4 degrees x 2 orientations\"")
-    println(io, "moments = \"6 methods x 4 degrees x 2 orientations\"")
-    println(io, "")
-    println(io, "[reference]")
-    println(io, "paper = \"Farah et al. (2015) Sec. 5.1, Fig. 10\"")
-    println(io, "seg_based_tri_gauss = \"NQUAD_mortar=p+2: p=1->3pts, p>=2->7pts (Cowper)\"")
-end
+# ── Meta (TOML) — proper provenance via write_meta_toml ───────────────────────
+# The shared TM_RESULTS_DIR also receives eps_sweep.csv and nquad_sweep.csv
+# from the parallel SLURM jobs (submit_flat_patch_3d.sh); list them here so
+# the meta.toml documents the full run-dir contents even though their
+# wallclocks are tracked separately by their own driver scripts.
+write_meta_toml(results_dir;
+    benchmark   = "flat_patch_test_3d",
+    description = "3D flat patch test (Farah-style overhang): factorial + moments + eps_sweep + nquad_sweep",
+    parameters  = Dict(
+        "epss"               => 10.0,
+        "NQUAD"              => "p+1",
+        "NQUAD_mortar"       => "p+2",
+        "degrees"            => [1, 2, 3, 4],
+        "slave_orientations" => ["sL (lower=slave)", "sU (upper=slave)"],
+        "factorial_methods"  => ["TME", "TMS", "DPME", "DPMS", "SPME", "SPMS"],
+    ),
+    outputs   = ["factorial.csv", "moments.csv", "eps_sweep.csv", "nquad_sweep.csv"],
+    extras    = Dict(
+        "geometry" => Dict(
+            "L_lower"   => 10.0,
+            "H_lower"   => 4.0,
+            "L_upper"   => 5.0,
+            "H_upper"   => 4.0,
+            "n_lower"   => 5,
+            "n_upper"   => 3,
+            "n_z"       => 3,
+            "interface" => "F6-F1 (overhanging, Farah et al. 2015 Fig. 10)",
+        ),
+        "material" => Dict(
+            "E"  => 100.0,
+            "nu" => 0.0,
+        ),
+        "loading" => Dict(
+            "sigma_app"   => 0.5,
+            "description" => "sigma_zz = -0.5 Neumann on P2 top + P1 rim",
+        ),
+        "reference" => Dict(
+            "paper"               => "Farah et al. (2015) Sec. 5.1, Fig. 10",
+            "seg_based_tri_gauss" => "NQUAD_mortar=p+2: p=1->3pts, p>=2->7pts (Cowper)",
+        ),
+    ),
+    wallclock_seconds = time() - t_start,
+)
 
 println("\nFactorial + moments complete. Results saved to:\n  ", results_dir)
